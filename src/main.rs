@@ -1,10 +1,14 @@
 use anyhow::{Context, anyhow};
 use octocrab::{Octocrab, models::AppId};
-use std::env;
+use std::{env, path::PathBuf};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let app_client = make_app_client().await?;
+    let (data_dir, _) = tokio::try_join!(init_data_dir(), initialize_app_client())?;
+
+    // PROTOTYPE CODE BELOW, LEAVE ALONE
+
+    let app_client = octocrab::instance();
 
     let installation = app_client
         .apps()
@@ -38,7 +42,19 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn make_app_client() -> anyhow::Result<Octocrab> {
+async fn init_data_dir() -> anyhow::Result<PathBuf> {
+    let data_dir = PathBuf::from(env::var("HAZEL_DATA_DIR").context("HAZEL_DATA_DIR not set")?);
+
+    tokio::try_join!(
+        tokio::fs::create_dir_all(data_dir.join("repos")),
+        tokio::fs::create_dir_all(data_dir.join("deploys")),
+    )
+    .context("failed to create directories")?;
+
+    Ok(data_dir)
+}
+
+async fn initialize_app_client() -> anyhow::Result<()> {
     let app_id: u64 = env::var("GITHUB_APP_ID")
         .context("GITHUB_APP_ID not set")?
         .parse()
@@ -49,8 +65,12 @@ async fn make_app_client() -> anyhow::Result<Octocrab> {
         .with_context(|| format!("failed to read key from {key_path}"))?;
     let key = jsonwebtoken::EncodingKey::from_rsa_pem(key.as_bytes())?;
 
-    Octocrab::builder()
-        .app(AppId(app_id), key)
-        .build()
-        .context("app client failed to build")
+    octocrab::initialise(
+        Octocrab::builder()
+            .app(AppId(app_id), key)
+            .build()
+            .context("app client failed to build")?,
+    );
+
+    Ok(())
 }
