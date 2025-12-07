@@ -1,44 +1,57 @@
-use anyhow::{Context, anyhow};
+use anyhow::Context;
+use hazel::{Repo, git};
 use octocrab::{Octocrab, models::AppId};
+use secrecy::ExposeSecret;
 use std::{env, path::PathBuf};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let (data_dir, _) = tokio::try_join!(init_data_dir(), initialize_app_client())?;
 
-    // PROTOTYPE CODE BELOW, LEAVE ALONE
+    // TODO: don't capture output of commands, do something more sophisticated
+
+    // PROTOTYPE CODE BELOW
+
+    let repo = Repo::new("seridescent", "hazel-test-repo");
 
     let app_client = octocrab::instance();
 
     let installation = app_client
         .apps()
-        .get_repository_installation("seridescent", "hazel-test-repo")
+        .get_repository_installation(&repo.owner, &repo.name)
         .await?;
 
-    // authenticate as installation
-    let (octocrab, _installation_token) =
+    let (installation_client, installation_token) =
         app_client.installation_and_token(installation.id).await?;
 
-    let open_pulls = octocrab
-        .pulls("seridescent", "hazel-test-repo")
+    let repo_dir = data_dir.join("repos").join(repo.to_string());
+    let clone_url = format!(
+        "https://x-access-token:{}@github.com/{}.git",
+        installation_token.expose_secret(),
+        repo,
+    );
+
+    let bare_repo = git::sync_repo(&repo_dir, &clone_url).await?;
+
+    let open_pulls = installation_client
+        .pulls(&repo.owner, &repo.name)
         .list()
         .state(octocrab::params::State::Open)
         .send()
         .await?;
 
-    let test_pull = open_pulls
-        .items
-        .get(0)
-        .ok_or(anyhow!("test pull missing"))?;
+    for pull in &open_pulls.items {
+        let head_sha = &pull.head.sha;
+        let pr_number = pull.number;
 
-    println!(
-        "{:?} {:?}",
-        test_pull.number,
-        test_pull
-            .title
-            .clone()
-            .ok_or(anyhow!("test pull missing title"))?
-    );
+        println!("processing PR #{pr_number} (head: {head_sha})");
+
+        let worktree_dir = repo_dir.join("worktrees").join(format!("pr-{pr_number}"));
+        git::sync_worktree(&bare_repo, &worktree_dir, head_sha).await?;
+
+        println!("PR #{pr_number} ready at {worktree_dir:?}");
+    }
+
     Ok(())
 }
 
@@ -50,6 +63,10 @@ async fn init_data_dir() -> anyhow::Result<PathBuf> {
         tokio::fs::create_dir_all(data_dir.join("deploys")),
     )
     .context("failed to create directories")?;
+
+    let data_dir = tokio::fs::canonicalize(&data_dir)
+        .await
+        .with_context(|| format!("failed to canonicalize {data_dir:?}"))?;
 
     Ok(data_dir)
 }

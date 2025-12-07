@@ -503,6 +503,7 @@ dependencies = [
  "anyhow",
  "jsonwebtoken",
  "octocrab",
+ "secrecy",
  "tokio",
 ]
 
