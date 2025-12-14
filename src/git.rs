@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 /// Ensures the bare repo exists.
 /// Creates repo_dir/repo.git if it doesn't exist.
@@ -28,61 +28,64 @@ pub async fn ensure_repo(repo_dir: &Path, clone_url: &str) -> anyhow::Result<Pat
     Ok(bare_repo)
 }
 
-/// Ensures worktree exists at the given path and is at the correct SHA.
-/// Fetches the commit first, then creates worktree if it doesn't exist, otherwise checks out the SHA.
-pub async fn sync_worktree(
-    bare_repo: &Path,
-    worktree_dir: &Path,
-    head_sha: &str,
-) -> anyhow::Result<()> {
+/// Extracts a commit to a directory using git archive.
+/// Fetches the commit first, then extracts if the directory doesn't exist.
+/// Since directories are SHA-based, an existing directory is already correct.
+pub async fn extract_commit(bare_repo: &Path, dest: &Path, sha: &str) -> anyhow::Result<()> {
     // Fetch the commit to ensure it's available
     let output = Command::new("git")
         .arg("-C")
         .arg(bare_repo)
-        .args(["fetch", "origin", head_sha])
+        .args(["fetch", "origin", sha])
         .output()
         .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git fetch {head_sha} failed: {stderr}");
+        bail!("git fetch {sha} failed: {stderr}");
     }
 
-    let worktrees_dir = worktree_dir
-        .parent()
-        .context("worktree_dir has no parent")?;
+    // SHA-based directory: if it exists, it's already correct
+    if dest.exists() {
+        debug!(path = %dest.display(), sha = %sha, "already extracted");
+        return Ok(());
+    }
 
-    if !worktree_dir.exists() {
-        info!(path = %worktree_dir.display(), sha = %head_sha, "creating worktree");
-        tokio::fs::create_dir_all(worktrees_dir).await?;
+    info!(path = %dest.display(), sha = %sha, "extracting commit");
+    tokio::fs::create_dir_all(dest).await?;
 
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(bare_repo)
-            .args(["worktree", "add"])
-            .arg(worktree_dir)
-            .arg(head_sha)
-            .output()
-            .await?;
+    // git archive <sha> | tar -xf - -C <dest>
+    let mut git_archive = Command::new("git")
+        .arg("-C")
+        .arg(bare_repo)
+        .args(["archive", sha])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to spawn git archive")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git worktree add failed: {stderr}");
-        }
-    } else {
-        debug!(path = %worktree_dir.display(), sha = %head_sha, "checking out");
+    let git_stdout = git_archive
+        .stdout
+        .take()
+        .context("failed to get git archive stdout")?
+        .into_owned_fd()
+        .context("failed to convert stdout to owned fd")?;
 
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(worktree_dir)
-            .args(["checkout", head_sha])
-            .output()
-            .await?;
+    let tar_output = Command::new("tar")
+        .args(["-xf", "-", "-C"])
+        .arg(dest)
+        .stdin(git_stdout)
+        .output()
+        .await?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git checkout failed: {stderr}");
-        }
+    let git_status = git_archive.wait().await?;
+
+    if !git_status.success() {
+        bail!("git archive {sha} failed");
+    }
+
+    if !tar_output.status.success() {
+        let stderr = String::from_utf8_lossy(&tar_output.stderr);
+        bail!("tar extract failed: {stderr}");
     }
 
     Ok(())

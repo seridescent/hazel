@@ -54,10 +54,13 @@ async fn main() -> anyhow::Result<()> {
 
         info!(pr = pr_number, sha = %head_sha, "processing PR");
 
-        let worktree_dir = repo_dir.join("worktrees").join(format!("pr-{pr_number}"));
-        git::sync_worktree(&bare_repo, &worktree_dir, head_sha).await?;
+        let source_dir = repo_dir.join(head_sha);
+        git::extract_commit(&bare_repo, &source_dir, head_sha).await?;
 
-        info!(pr = pr_number, path = %worktree_dir.display(), "PR ready");
+        let run_dir = data_dir.join("deploys").join(head_sha);
+        tokio::fs::create_dir_all(&run_dir).await?;
+
+        info!(pr = pr_number, source = %source_dir.display(), run = %run_dir.display(), "deploy ready");
     }
 
     Ok(())
