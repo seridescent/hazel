@@ -2,10 +2,10 @@ use anyhow::{Context, bail};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-/// Ensures the bare repo exists and is up-to-date.
-/// Creates repo_dir/repo.git if it doesn't exist, otherwise fetches.
+/// Ensures the bare repo exists.
+/// Creates repo_dir/repo.git if it doesn't exist.
 /// Returns path to repo.git.
-pub async fn sync_repo(repo_dir: &Path, clone_url: &str) -> anyhow::Result<PathBuf> {
+pub async fn ensure_repo(repo_dir: &Path, clone_url: &str) -> anyhow::Result<PathBuf> {
     let bare_repo = repo_dir.join("repo.git");
 
     if !bare_repo.exists() {
@@ -22,32 +22,31 @@ pub async fn sync_repo(repo_dir: &Path, clone_url: &str) -> anyhow::Result<PathB
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("git clone failed: {stderr}");
         }
-    } else {
-        println!("fetching latest into {bare_repo:?}");
-
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&bare_repo)
-            .args(["fetch", "--all"])
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git fetch failed: {stderr}");
-        }
     }
 
     Ok(bare_repo)
 }
 
 /// Ensures worktree exists at the given path and is at the correct SHA.
-/// Creates worktree if it doesn't exist, otherwise checks out the SHA.
+/// Fetches the commit first, then creates worktree if it doesn't exist, otherwise checks out the SHA.
 pub async fn sync_worktree(
     bare_repo: &Path,
     worktree_dir: &Path,
     head_sha: &str,
 ) -> anyhow::Result<()> {
+    // Fetch the commit to ensure it's available
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(bare_repo)
+        .args(["fetch", "origin", head_sha])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git fetch {head_sha} failed: {stderr}");
+    }
+
     let worktrees_dir = worktree_dir
         .parent()
         .context("worktree_dir has no parent")?;
@@ -70,7 +69,6 @@ pub async fn sync_worktree(
             bail!("git worktree add failed: {stderr}");
         }
     } else {
-        // TODO: check if already at correct SHA before checkout
         println!("checking out {head_sha} in {worktree_dir:?}");
 
         let output = Command::new("git")

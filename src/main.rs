@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
         repo,
     );
 
-    let bare_repo = git::sync_repo(&repo_dir, &clone_url).await?;
+    let bare_repo = git::ensure_repo(&repo_dir, &clone_url).await?;
 
     let open_pulls = installation_client
         .pulls(&repo.owner, &repo.name)
