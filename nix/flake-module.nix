@@ -47,10 +47,29 @@ in
         packages = {
           hazel-preStart = pkgs.writeShellApplication {
             name = "hazel-preStart";
-            text = cfg.preStart;
+            text = ''
+              if [ -z "''${HAZEL_RUN_DIR:-}" ]; then
+                echo "Error: HAZEL_RUN_DIR is not set" >&2
+                exit 1
+              fi
+              ${cfg.preStart}
+            '';
           };
 
-          hazel-executable = cfg.executable;
+          hazel-executable = pkgs.writeShellApplication {
+            name = "hazel-executable";
+            text = ''
+              if [ -z "''${HAZEL_RUN_DIR:-}" ]; then
+                echo "Error: HAZEL_RUN_DIR is not set" >&2
+                exit 1
+              fi
+              if [ -z "''${HAZEL_PORT:-}" ]; then
+                echo "Error: HAZEL_PORT is not set" >&2
+                exit 1
+              fi
+              exec ${cfg.executable}/bin/${cfg.executable.name}
+            '';
+          };
         };
       };
     });
