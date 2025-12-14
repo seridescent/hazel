@@ -8,9 +8,11 @@ pub struct Deployment {
     pub sha: String,
     pub port: u16,
     pub process: Child,
+    pub serve: Child,
 }
 
 pub struct DeploymentManager {
+    tailscale_proxy_port: u16,
     port_min: u16,
     port_max: u16,
     next_port: u16,
@@ -19,8 +21,9 @@ pub struct DeploymentManager {
 }
 
 impl DeploymentManager {
-    pub fn new(port_min: u16, port_max: u16) -> Self {
+    pub fn new(tailscale_proxy_port: u16, port_min: u16, port_max: u16) -> Self {
         Self {
+            tailscale_proxy_port,
             port_min,
             port_max,
             next_port: port_min,
@@ -38,8 +41,6 @@ impl DeploymentManager {
         Ok(port)
     }
 
-    /// Starts a deployment for the given SHA.
-    /// Runs preStart then spawns the executable, tracking the process handle.
     pub async fn start(
         &mut self,
         sha: &str,
@@ -48,11 +49,18 @@ impl DeploymentManager {
     ) -> anyhow::Result<()> {
         let port = self.allocate_port()?;
 
+        // TODO: lift the rest of this except the map insert into a function
+        // that takes a port so it can be its own task
+
         tokio::fs::create_dir_all(run_dir).await?;
 
         info!(sha = %sha, port = port, "starting deployment");
 
-        // Run preStart script
+        // TODO: provide a host env var (e.g. a <device-name>.tailnet-id.ts.net)
+        // so services can allow-list it during staging.
+        // can get this DNSName with equivalent of `tailscale status --self --json | jq ".Self.DNSName"`
+
+        // TODO: this can fail for lack of permission to do something like cp over an existing file
         let pre_start_status = Command::new("nix")
             .args(["run", &format!("{}#hazel-preStart", checkout_dir.display())])
             .env("HAZEL_RUN_DIR", run_dir)
@@ -65,7 +73,6 @@ impl DeploymentManager {
             bail!("preStart failed for {sha}");
         }
 
-        // Spawn the executable (keep handle)
         let process = Command::new("nix")
             .args([
                 "run",
@@ -79,12 +86,26 @@ impl DeploymentManager {
 
         info!(sha = %sha, port = port, pid = ?process.id(), "deployment started");
 
+        let serve = Command::new("tailscale")
+            .args([
+                "serve",
+                &format!("--http={}", self.tailscale_proxy_port),
+                &format!("--set-path={sha}"),
+                &format!("localhost:{port}"),
+            ])
+            .current_dir(run_dir)
+            .spawn()
+            .context("failed to serve via tailscale")?;
+
+        info!(sha = %sha, serve_pid = ?serve.id(), "tailscale serve started");
+
         self.deployments.insert(
             sha.to_string(),
             Deployment {
                 sha: sha.to_string(),
                 port,
                 process,
+                serve,
             },
         );
 
@@ -94,6 +115,11 @@ impl DeploymentManager {
     pub async fn kill_all(&mut self) {
         for (sha, deployment) in &mut self.deployments {
             info!(sha = %sha, port = deployment.port, "killing deployment");
+
+            if let Err(e) = deployment.serve.kill().await {
+                warn!(sha = %sha, error = ?e, "failed to kill tailscale serve");
+            }
+
             if let Err(e) = deployment.process.kill().await {
                 warn!(sha = %sha, error = ?e, "failed to kill deployment");
             }

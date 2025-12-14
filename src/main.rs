@@ -117,6 +117,10 @@ async fn initialize_app_client() -> anyhow::Result<()> {
 }
 
 fn initialize_deployment_manager() -> anyhow::Result<DeploymentManager> {
+    let tailscale_proxy_port: u16 = env::var("HAZEL_TAILSCALE_PROXY_PORT")
+        .context("HAZEL_TAILSCALE_PROXY_PORT not set")?
+        .parse()
+        .context("HAZEL_TAILSCALE_PROXY_PORT must be a number")?;
     let port_min: u16 = env::var("HAZEL_PORT_MIN")
         .context("HAZEL_PORT_MIN not set")?
         .parse()
@@ -126,5 +130,9 @@ fn initialize_deployment_manager() -> anyhow::Result<DeploymentManager> {
         .parse()
         .context("HAZEL_PORT_MAX must be a number")?;
 
-    Ok(DeploymentManager::new(port_min, port_max))
+    Ok(DeploymentManager::new(
+        tailscale_proxy_port,
+        port_min,
+        port_max,
+    ))
 }
