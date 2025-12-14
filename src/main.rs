@@ -35,6 +35,15 @@ async fn main() -> anyhow::Result<()> {
     //  there is a function implementing this logic, but it's not public for some reason.
     //  meanwhile, there isn't an ergonomic way (AFAICT) to set the required auth headers and
     //  construct the request myself. one would expect the installation client to do this, but it doesn't.
+    //
+    //  update: source suggests the correct way to do this is `Octocrab::execute`, which should attach auth headers.
+    //  and even handle caching the installation token. that doesn't totally help for incremental fetching though...
+    //  it's not clear to me what the intended difference is between send and execute but shrug
+    //
+    //  another alternative is to use the CachedToken struct to store a token myself.
+    //  we should be able to fetch a token with execute
+    //  we write a little bit of wrapper code to fetch a new token if cached_token.valid_token() is None,
+    //  other wise valid_token() returns the SecretString we are used to
     let (installation_client, installation_token) =
         app_client.installation_and_token(installation.id).await?;
 

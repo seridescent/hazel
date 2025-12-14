@@ -73,6 +73,9 @@ impl DeploymentManager {
             bail!("preStart failed for {sha}");
         }
 
+        // TODO: tailscale serve and the actual server process are independent,
+        // so they can be started together
+
         let process = Command::new("nix")
             .args([
                 "run",
