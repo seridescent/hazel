@@ -1,6 +1,7 @@
 use anyhow::{Context, bail};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
+use tracing::{info, debug};
 
 /// Ensures the bare repo exists.
 /// Creates repo_dir/repo.git if it doesn't exist.
@@ -9,7 +10,7 @@ pub async fn ensure_repo(repo_dir: &Path, clone_url: &str) -> anyhow::Result<Pat
     let bare_repo = repo_dir.join("repo.git");
 
     if !bare_repo.exists() {
-        println!("cloning bare repo to {bare_repo:?}");
+        info!(path = %bare_repo.display(), "cloning bare repo");
         tokio::fs::create_dir_all(repo_dir).await?;
 
         let output = Command::new("git")
@@ -52,7 +53,7 @@ pub async fn sync_worktree(
         .context("worktree_dir has no parent")?;
 
     if !worktree_dir.exists() {
-        println!("creating worktree at {worktree_dir:?}");
+        info!(path = %worktree_dir.display(), sha = %head_sha, "creating worktree");
         tokio::fs::create_dir_all(worktrees_dir).await?;
 
         let output = Command::new("git")
@@ -69,7 +70,7 @@ pub async fn sync_worktree(
             bail!("git worktree add failed: {stderr}");
         }
     } else {
-        println!("checking out {head_sha} in {worktree_dir:?}");
+        debug!(path = %worktree_dir.display(), sha = %head_sha, "checking out");
 
         let output = Command::new("git")
             .arg("-C")

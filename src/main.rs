@@ -3,9 +3,17 @@ use hazel::{Repo, git};
 use octocrab::{Octocrab, models::AppId};
 use secrecy::ExposeSecret;
 use std::{env, path::PathBuf};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .init();
+
     let (data_dir, _) = tokio::try_join!(init_data_dir(), initialize_app_client())?;
 
     // TODO: don't capture output of commands, do something more sophisticated
@@ -44,12 +52,12 @@ async fn main() -> anyhow::Result<()> {
         let head_sha = &pull.head.sha;
         let pr_number = pull.number;
 
-        println!("processing PR #{pr_number} (head: {head_sha})");
+        info!(pr = pr_number, sha = %head_sha, "processing PR");
 
         let worktree_dir = repo_dir.join("worktrees").join(format!("pr-{pr_number}"));
         git::sync_worktree(&bare_repo, &worktree_dir, head_sha).await?;
 
-        println!("PR #{pr_number} ready at {worktree_dir:?}");
+        info!(pr = pr_number, path = %worktree_dir.display(), "PR ready");
     }
 
     Ok(())
