@@ -1,7 +1,7 @@
 use anyhow::Context;
 use hazel::{
     Repo, Sha,
-    deploy::{Deployment, deploy_sha, kill_deployment},
+    deploy::{Deployment, clear_tailscale_serve, deploy_sha, kill_deployment},
     git,
     installation::Installation,
     port_allocator::PortAllocator,
@@ -26,8 +26,7 @@ async fn main() -> anyhow::Result<()> {
     let tailscale_proxy_port = initialize_tailscale_proxy_port()?;
     let poll_interval = initialize_poll_interval()?;
 
-    // TODO: call `tailscale serve --yes --http=<tailscale_proxy_port> off`
-    //  expect success.
+    clear_tailscale_serve(tailscale_proxy_port).await?;
 
     let repo = Repo::new("seridescent", "hazel-test-repo");
     let installation = initialize_installation(&app_client, repo.clone()).await?;
@@ -105,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
             .collect::<Vec<_>>()
         {
             if let Some(mut deployment) = deployments.remove(&sha) {
-                kill_deployment(&mut deployment).await;
+                kill_deployment(tailscale_proxy_port, &mut deployment).await;
                 port_allocator.release(deployment.port);
             }
         }
@@ -124,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("shutting down");
     for (_, mut deployment) in deployments {
-        kill_deployment(&mut deployment).await;
+        kill_deployment(tailscale_proxy_port, &mut deployment).await;
     }
 
     Ok(())

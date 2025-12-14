@@ -514,6 +514,7 @@ dependencies = [
  "jsonwebtoken",
  "octocrab",
  "secrecy",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
