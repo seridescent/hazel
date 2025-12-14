@@ -1,4 +1,4 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use std::path::Path;
 use tokio::process::{Child, Command};
 use tracing::{info, warn};
@@ -15,13 +15,13 @@ pub struct Deployment {
 pub async fn kill_deployment(tailscale_proxy_port: u16, deployment: &mut Deployment) {
     info!(sha = %deployment.sha, port = deployment.port, "killing deployment");
 
-    // TODO: nix run forks internally, so killing this process orphans the child.
-    //  SIGINT might work better than SIGKILL since nix can handle it and clean up.
+    // if the executable produces a child process, this will not clean them all up
+    // correctly. that's expected for now. executable derivations should end in `exec`
+    // if they are scripts
     if let Err(e) = deployment.process.kill().await {
         warn!(sha = %deployment.sha, error = ?e, "failed to kill deployment process");
     }
 
-    // Wait for process to fully exit
     if let Err(e) = deployment.process.wait().await {
         warn!(sha = %deployment.sha, error = ?e, "failed to wait for deployment process");
     }
@@ -99,10 +99,6 @@ pub async fn deploy_sha(
 
     info!(sha = %sha, port = port, "starting deployment");
 
-    // TODO: provide a host env var (e.g. a <device-name>.tailnet-id.ts.net)
-    // so services can allow-list it during staging.
-
-    // TODO: this can fail for lack of permission to do something like cp over an existing file
     let pre_start_status = Command::new("nix")
         .args(["run", &format!("{}#hazel-preStart", checkout_dir.display())])
         .env("HAZEL_RUN_DIR", run_dir)
