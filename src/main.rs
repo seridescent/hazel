@@ -1,9 +1,13 @@
 use anyhow::Context;
 use hazel::{
-    Repo, deploy::deploy_sha, git, installation::Installation, port_allocator::PortAllocator,
+    Repo, Sha,
+    deploy::{Deployment, deploy_sha, kill_deployment},
+    git,
+    installation::Installation,
+    port_allocator::PortAllocator,
 };
 use octocrab::{Octocrab, models::AppId};
-use std::{collections::HashMap, env, path::PathBuf};
+use std::{collections::HashMap, env, path::PathBuf, time::Duration};
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
@@ -20,6 +24,10 @@ async fn main() -> anyhow::Result<()> {
     let app_client = initialize_app_client().await?;
     let mut port_allocator = initialize_port_allocator()?;
     let tailscale_proxy_port = initialize_tailscale_proxy_port()?;
+    let poll_interval = initialize_poll_interval()?;
+
+    // TODO: call `tailscale serve --yes --http=<tailscale_proxy_port> off`
+    //  expect success.
 
     let repo = Repo::new("seridescent", "hazel-test-repo");
     let installation = initialize_installation(&app_client, repo.clone()).await?;
@@ -27,57 +35,96 @@ async fn main() -> anyhow::Result<()> {
     let repo_dir = data_dir.join("repos").join(repo.to_string());
     let bare_repo = git::ensure_bare_repo(&repo_dir).await?;
 
-    let targets = installation.fetch_deploy_targets(&app_client).await?;
-    info!(count = targets.len(), "fetched deploy targets");
+    let mut deployments: HashMap<Sha, Deployment> = HashMap::new();
 
-    let mut set = JoinSet::new();
-    for (sha, fetch_url) in targets {
-        let port = port_allocator.allocate()?;
-        let bare_repo = bare_repo.clone();
-        let data_dir = data_dir.clone();
-
-        set.spawn(async move {
-            let checkout_dir = data_dir.join("checkouts").join(sha.as_str());
-            git::extract_commit(&bare_repo, fetch_url.as_str(), sha.as_str(), &checkout_dir)
-                .await?;
-
-            let run_dir = data_dir.join("deploys").join(sha.as_str());
-            deploy_sha(&sha, &checkout_dir, &run_dir, port, tailscale_proxy_port).await
-        });
-    }
-
-    let mut deployments = HashMap::new();
-    while let Some(result) = set.join_next().await {
-        match result {
-            Ok(Ok(deployment)) => {
-                info!(sha = %deployment.sha, port = deployment.port, "deployment succeeded");
-                deployments.insert(deployment.sha.clone(), deployment);
-            }
-            Ok(Err(e)) => {
-                warn!(error = ?e, "deployment failed");
-            }
+    loop {
+        let targets = match installation.fetch_deploy_targets(&app_client).await {
+            Ok(t) => t,
             Err(e) => {
-                warn!(error = ?e, "task panicked");
+                warn!(error = ?e, "failed to fetch deploy targets");
+                tokio::select! {
+                    _ = tokio::time::sleep(poll_interval) => continue,
+                    _ = tokio::signal::ctrl_c() => break,
+                }
+            }
+        };
+
+        let new_targets: Vec<_> = targets
+            .iter()
+            .filter(|(sha, _)| !deployments.contains_key(sha))
+            .collect();
+
+        if !new_targets.is_empty() {
+            info!(count = new_targets.len(), "deploying new targets");
+
+            let mut set = JoinSet::new();
+            for (sha, fetch_url) in new_targets {
+                let port = port_allocator.allocate()?;
+                let bare_repo = bare_repo.clone();
+                let data_dir = data_dir.clone();
+                let sha = sha.clone();
+                let fetch_url = fetch_url.clone();
+
+                set.spawn(async move {
+                    let checkout_dir = data_dir.join("checkouts").join(sha.as_str());
+                    git::extract_commit(
+                        &bare_repo,
+                        fetch_url.as_str(),
+                        sha.as_str(),
+                        &checkout_dir,
+                    )
+                    .await?;
+
+                    let run_dir = data_dir.join("deploys").join(sha.as_str());
+                    deploy_sha(&sha, &checkout_dir, &run_dir, port, tailscale_proxy_port).await
+                });
+            }
+
+            while let Some(result) = set.join_next().await {
+                match result {
+                    Ok(Ok(deployment)) => {
+                        info!(sha = %deployment.sha, port = deployment.port, "deployment succeeded");
+                        deployments.insert(deployment.sha.clone(), deployment);
+                    }
+                    Ok(Err(e)) => {
+                        warn!(error = ?e, "deployment failed");
+                    }
+                    Err(e) => {
+                        warn!(error = ?e, "task panicked");
+                    }
+                }
             }
         }
+
+        let target_shas: std::collections::HashSet<_> =
+            targets.iter().map(|(sha, _)| sha).collect();
+        for sha in deployments
+            .keys()
+            .filter(|sha| !target_shas.contains(sha))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if let Some(mut deployment) = deployments.remove(&sha) {
+                kill_deployment(&mut deployment).await;
+                port_allocator.release(deployment.port);
+            }
+        }
+
+        info!(
+            active = deployments.len(),
+            targets = targets.len(),
+            "poll complete"
+        );
+
+        tokio::select! {
+            _ = tokio::time::sleep(poll_interval) => {}
+            _ = tokio::signal::ctrl_c() => break,
+        }
     }
-
-    info!(count = deployments.len(), "all deployments started");
-
-    // TODO: proper signal handling?
-    tokio::signal::ctrl_c().await?;
 
     info!("shutting down");
-    for (sha, deployment) in &mut deployments {
-        info!(sha = %sha, port = deployment.port, "killing deployment");
-
-        if let Err(e) = deployment.serve.kill().await {
-            warn!(sha = %sha, error = ?e, "failed to kill tailscale serve");
-        }
-
-        if let Err(e) = deployment.process.kill().await {
-            warn!(sha = %sha, error = ?e, "failed to kill deployment");
-        }
+    for (_, mut deployment) in deployments {
+        kill_deployment(&mut deployment).await;
     }
 
     Ok(())
@@ -158,4 +205,13 @@ fn initialize_tailscale_proxy_port() -> anyhow::Result<u16> {
         .context("HAZEL_TAILSCALE_PROXY_PORT not set")?
         .parse()
         .context("HAZEL_TAILSCALE_PROXY_PORT must be a number")
+}
+
+fn initialize_poll_interval() -> anyhow::Result<Duration> {
+    let secs: u64 = env::var("HAZEL_POLL_INTERVAL_SECS")
+        .context("HAZEL_POLL_INTERVAL_SECS not set")?
+        .parse()
+        .context("HAZEL_POLL_INTERVAL_SECS must be a number")?;
+
+    Ok(Duration::from_secs(secs))
 }

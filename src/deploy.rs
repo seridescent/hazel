@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use std::path::Path;
 use tokio::process::{Child, Command};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::Sha;
 
@@ -10,6 +10,19 @@ pub struct Deployment {
     pub port: u16,
     pub process: Child,
     pub serve: Child,
+}
+
+/// Kills a deployment's processes.
+pub async fn kill_deployment(deployment: &mut Deployment) {
+    info!(sha = %deployment.sha, port = deployment.port, "killing deployment");
+
+    if let Err(e) = deployment.serve.kill().await {
+        warn!(sha = %deployment.sha, error = ?e, "failed to kill tailscale serve");
+    }
+
+    if let Err(e) = deployment.process.kill().await {
+        warn!(sha = %deployment.sha, error = ?e, "failed to kill deployment");
+    }
 }
 
 /// Deploys a single SHA. Returns a Deployment on success.
@@ -43,6 +56,10 @@ pub async fn deploy_sha(
     // TODO: tailscale serve and the actual server process are independent,
     // so they can be started together
 
+    // TODO: handle spawned processes exiting with error in unhappy case?
+    //  happy path: both of these processes live until killed by us, but
+    //  should probably do something about processes exiting unexpectedly
+
     let process = Command::new("nix")
         .args([
             "run",
@@ -56,6 +73,9 @@ pub async fn deploy_sha(
 
     info!(sha = %sha, port = port, pid = ?process.id(), "deployment started");
 
+    // TODO: spawn with bg instead to allow reverse proxy (disabled for fg serves)
+    //  the serve command should exit gracefully, and the shutdown procedure should instead
+    //  call `tailscale serve --yes --http=<tailscale_proxy_port> off`
     let serve = Command::new("tailscale")
         .args([
             "serve",
