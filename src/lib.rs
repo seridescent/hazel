@@ -1,3 +1,4 @@
+pub mod deploy;
 pub mod git;
 
 use std::fmt;

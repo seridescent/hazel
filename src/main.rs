@@ -1,5 +1,5 @@
 use anyhow::Context;
-use hazel::{Repo, git};
+use hazel::{Repo, deploy::DeploymentManager, git};
 use octocrab::{Octocrab, models::AppId};
 use secrecy::ExposeSecret;
 use std::{env, path::PathBuf};
@@ -14,9 +14,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let (data_dir, _) = tokio::try_join!(init_data_dir(), initialize_app_client())?;
+    let (data_dir, _) = tokio::try_join!(initialize_data_dir(), initialize_app_client())?;
 
-    // TODO: don't capture output of commands, do something more sophisticated
+    let mut manager = initialize_deployment_manager()?;
 
     // PROTOTYPE CODE BELOW
 
@@ -54,25 +54,31 @@ async fn main() -> anyhow::Result<()> {
         .send()
         .await?;
 
+    // Create checkouts and start deployments for each PR
     for pull in &open_pulls.items {
-        let head_sha = &pull.head.sha;
-        let pr_number = pull.number;
+        let sha = &pull.head.sha;
+        info!(pr = pull.number, sha = %sha, "processing PR");
 
-        info!(pr = pr_number, sha = %head_sha, "processing PR");
+        let checkout_dir = data_dir.join("checkouts").join(sha);
+        git::extract_commit(&bare_repo, &fetch_url, sha, &checkout_dir).await?;
 
-        let checkout_dir = data_dir.join("checkouts").join(head_sha);
-        git::extract_commit(&bare_repo, &fetch_url, head_sha, &checkout_dir).await?;
-
-        let run_dir = data_dir.join("deploys").join(head_sha);
-        tokio::fs::create_dir_all(&run_dir).await?;
-
-        info!(pr = pr_number, checkout = %checkout_dir.display(), run = %run_dir.display(), "deploy ready");
+        let run_dir = data_dir.join("deploys").join(sha);
+        manager.start(sha, &checkout_dir, &run_dir).await?;
     }
+
+    info!(count = manager.deployments.len(), "all deployments started");
+
+    // Keep the process alive while deployments run
+    // TODO: proper signal handling, webhook server, etc.
+    tokio::signal::ctrl_c().await?;
+
+    info!("shutting down");
+    manager.kill_all().await;
 
     Ok(())
 }
 
-async fn init_data_dir() -> anyhow::Result<PathBuf> {
+async fn initialize_data_dir() -> anyhow::Result<PathBuf> {
     let data_dir = PathBuf::from(env::var("HAZEL_DATA_DIR").context("HAZEL_DATA_DIR not set")?);
 
     tokio::try_join!(
@@ -108,4 +114,17 @@ async fn initialize_app_client() -> anyhow::Result<()> {
     );
 
     Ok(())
+}
+
+fn initialize_deployment_manager() -> anyhow::Result<DeploymentManager> {
+    let port_min: u16 = env::var("HAZEL_PORT_MIN")
+        .context("HAZEL_PORT_MIN not set")?
+        .parse()
+        .context("HAZEL_PORT_MIN must be a number")?;
+    let port_max: u16 = env::var("HAZEL_PORT_MAX")
+        .context("HAZEL_PORT_MAX not set")?
+        .parse()
+        .context("HAZEL_PORT_MAX must be a number")?;
+
+    Ok(DeploymentManager::new(port_min, port_max))
 }
