@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 jsonwebtoken = "10.2.0"
 octocrab = "0.48.1"
 secrecy = "0.10.3"

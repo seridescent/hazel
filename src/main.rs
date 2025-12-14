@@ -1,9 +1,11 @@
 use anyhow::Context;
-use hazel::{Repo, deploy::DeploymentManager, git};
+use hazel::{
+    Repo, deploy::deploy_sha, git, installation::Installation, port_allocator::PortAllocator,
+};
 use octocrab::{Octocrab, models::AppId};
-use secrecy::ExposeSecret;
-use std::{env, path::PathBuf};
-use tracing::info;
+use std::{collections::HashMap, env, path::PathBuf};
+use tokio::task::JoinSet;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -14,75 +16,69 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let (data_dir, _) = tokio::try_join!(initialize_data_dir(), initialize_app_client())?;
-
-    let mut manager = initialize_deployment_manager()?;
-
-    // PROTOTYPE CODE BELOW
+    let data_dir = initialize_data_dir().await?;
+    let app_client = initialize_app_client().await?;
+    let mut port_allocator = initialize_port_allocator()?;
+    let tailscale_proxy_port = initialize_tailscale_proxy_port()?;
 
     let repo = Repo::new("seridescent", "hazel-test-repo");
-
-    let app_client = octocrab::instance();
-
-    let installation = app_client
-        .apps()
-        .get_repository_installation(&repo.owner, &repo.name)
-        .await?;
-
-    // TODO: handle installation token expiry
-    //  installation tokens expire after an hour. fetch_url is built fresh each prototype run,
-    //  but for a long-running service we need to refresh the token periodically.
-    //  there is a function implementing this logic, but it's not public for some reason.
-    //  meanwhile, there isn't an ergonomic way (AFAICT) to set the required auth headers and
-    //  construct the request myself. one would expect the installation client to do this, but it doesn't.
-    //
-    //  update: source suggests the correct way to do this is `Octocrab::execute`, which should attach auth headers.
-    //  and even handle caching the installation token. that doesn't totally help for incremental fetching though...
-    //  it's not clear to me what the intended difference is between send and execute but shrug
-    //
-    //  another alternative is to use the CachedToken struct to store a token myself.
-    //  we should be able to fetch a token with execute
-    //  we write a little bit of wrapper code to fetch a new token if cached_token.valid_token() is None,
-    //  other wise valid_token() returns the SecretString we are used to
-    let (installation_client, installation_token) =
-        app_client.installation_and_token(installation.id).await?;
+    let installation = initialize_installation(&app_client, repo.clone()).await?;
 
     let repo_dir = data_dir.join("repos").join(repo.to_string());
     let bare_repo = git::ensure_bare_repo(&repo_dir).await?;
 
-    let fetch_url = format!(
-        "https://x-access-token:{}@github.com/{}.git",
-        installation_token.expose_secret(),
-        repo,
-    );
+    let targets = installation.fetch_deploy_targets(&app_client).await?;
+    info!(count = targets.len(), "fetched deploy targets");
 
-    let open_pulls = installation_client
-        .pulls(&repo.owner, &repo.name)
-        .list()
-        .state(octocrab::params::State::Open)
-        .send()
-        .await?;
+    let mut set = JoinSet::new();
+    for (sha, fetch_url) in targets {
+        let port = port_allocator.allocate()?;
+        let bare_repo = bare_repo.clone();
+        let data_dir = data_dir.clone();
 
-    // Create checkouts and start deployments for each PR
-    for pull in &open_pulls.items {
-        let sha = &pull.head.sha;
-        info!(pr = pull.number, sha = %sha, "processing PR");
+        set.spawn(async move {
+            let checkout_dir = data_dir.join("checkouts").join(sha.as_str());
+            git::extract_commit(&bare_repo, fetch_url.as_str(), sha.as_str(), &checkout_dir)
+                .await?;
 
-        let checkout_dir = data_dir.join("checkouts").join(sha);
-        git::extract_commit(&bare_repo, &fetch_url, sha, &checkout_dir).await?;
-
-        let run_dir = data_dir.join("deploys").join(sha);
-        manager.start(sha, &checkout_dir, &run_dir).await?;
+            let run_dir = data_dir.join("deploys").join(sha.as_str());
+            deploy_sha(&sha, &checkout_dir, &run_dir, port, tailscale_proxy_port).await
+        });
     }
 
-    info!(count = manager.deployments.len(), "all deployments started");
+    let mut deployments = HashMap::new();
+    while let Some(result) = set.join_next().await {
+        match result {
+            Ok(Ok(deployment)) => {
+                info!(sha = %deployment.sha, port = deployment.port, "deployment succeeded");
+                deployments.insert(deployment.sha.clone(), deployment);
+            }
+            Ok(Err(e)) => {
+                warn!(error = ?e, "deployment failed");
+            }
+            Err(e) => {
+                warn!(error = ?e, "task panicked");
+            }
+        }
+    }
 
-    // Keep the process alive while deployments run
-    // TODO: proper signal handling, webhook server, etc.
+    info!(count = deployments.len(), "all deployments started");
+
+    // TODO: proper signal handling?
     tokio::signal::ctrl_c().await?;
 
     info!("shutting down");
-    manager.kill_all().await;
+    for (sha, deployment) in &mut deployments {
+        info!(sha = %sha, port = deployment.port, "killing deployment");
+
+        if let Err(e) = deployment.serve.kill().await {
+            warn!(sha = %sha, error = ?e, "failed to kill tailscale serve");
+        }
+
+        if let Err(e) = deployment.process.kill().await {
+            warn!(sha = %sha, error = ?e, "failed to kill deployment");
+        }
+    }
 
     Ok(())
 }
@@ -104,7 +100,7 @@ async fn initialize_data_dir() -> anyhow::Result<PathBuf> {
     Ok(data_dir)
 }
 
-async fn initialize_app_client() -> anyhow::Result<()> {
+async fn initialize_app_client() -> anyhow::Result<Octocrab> {
     let app_id: u64 = env::var("GITHUB_APP_ID")
         .context("GITHUB_APP_ID not set")?
         .parse()
@@ -115,21 +111,36 @@ async fn initialize_app_client() -> anyhow::Result<()> {
         .with_context(|| format!("failed to read key from {key_path}"))?;
     let key = jsonwebtoken::EncodingKey::from_rsa_pem(key.as_bytes())?;
 
-    octocrab::initialise(
-        Octocrab::builder()
-            .app(AppId(app_id), key)
-            .build()
-            .context("app client failed to build")?,
-    );
-
-    Ok(())
+    Octocrab::builder()
+        .app(AppId(app_id), key)
+        .build()
+        .context("app client failed to build")
 }
 
-fn initialize_deployment_manager() -> anyhow::Result<DeploymentManager> {
-    let tailscale_proxy_port: u16 = env::var("HAZEL_TAILSCALE_PROXY_PORT")
-        .context("HAZEL_TAILSCALE_PROXY_PORT not set")?
-        .parse()
-        .context("HAZEL_TAILSCALE_PROXY_PORT must be a number")?;
+async fn initialize_installation(
+    app_client: &Octocrab,
+    repo: Repo,
+) -> anyhow::Result<Installation> {
+    let installation_info = app_client
+        .apps()
+        .get_repository_installation(&repo.owner, &repo.name)
+        .await
+        .context("failed to get installation")?;
+
+    let installation_client = app_client.installation(installation_info.id)?;
+    let access_tokens_url = installation_info
+        .access_tokens_url
+        .context("installation missing access_tokens_url")?
+        .to_string();
+
+    Ok(Installation::new(
+        installation_client,
+        access_tokens_url,
+        repo,
+    ))
+}
+
+fn initialize_port_allocator() -> anyhow::Result<PortAllocator> {
     let port_min: u16 = env::var("HAZEL_PORT_MIN")
         .context("HAZEL_PORT_MIN not set")?
         .parse()
@@ -139,9 +150,12 @@ fn initialize_deployment_manager() -> anyhow::Result<DeploymentManager> {
         .parse()
         .context("HAZEL_PORT_MAX must be a number")?;
 
-    Ok(DeploymentManager::new(
-        tailscale_proxy_port,
-        port_min,
-        port_max,
-    ))
+    Ok(PortAllocator::new(port_min, port_max))
+}
+
+fn initialize_tailscale_proxy_port() -> anyhow::Result<u16> {
+    env::var("HAZEL_TAILSCALE_PROXY_PORT")
+        .context("HAZEL_TAILSCALE_PROXY_PORT not set")?
+        .parse()
+        .context("HAZEL_TAILSCALE_PROXY_PORT must be a number")
 }
