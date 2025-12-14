@@ -60,13 +60,13 @@ async fn main() -> anyhow::Result<()> {
 
         info!(pr = pr_number, sha = %head_sha, "processing PR");
 
-        let source_dir = repo_dir.join(head_sha);
-        git::extract_commit(&bare_repo, &fetch_url, head_sha, &source_dir).await?;
+        let checkout_dir = data_dir.join("checkouts").join(head_sha);
+        git::extract_commit(&bare_repo, &fetch_url, head_sha, &checkout_dir).await?;
 
         let run_dir = data_dir.join("deploys").join(head_sha);
         tokio::fs::create_dir_all(&run_dir).await?;
 
-        info!(pr = pr_number, source = %source_dir.display(), run = %run_dir.display(), "deploy ready");
+        info!(pr = pr_number, checkout = %checkout_dir.display(), run = %run_dir.display(), "deploy ready");
     }
 
     Ok(())
@@ -77,6 +77,7 @@ async fn init_data_dir() -> anyhow::Result<PathBuf> {
 
     tokio::try_join!(
         tokio::fs::create_dir_all(data_dir.join("repos")),
+        tokio::fs::create_dir_all(data_dir.join("checkouts")),
         tokio::fs::create_dir_all(data_dir.join("deploys")),
     )
     .context("failed to create directories")?;
