@@ -29,6 +29,11 @@ async fn main() -> anyhow::Result<()> {
         .get_repository_installation(&repo.owner, &repo.name)
         .await?;
 
+    // TODO: handle installation token expiry
+    //  installation tokens expire after an hour, so the repo origin will be unusable afterward.
+    //  there is a function implementing this logic, but it's not public for some reason.
+    //  meanwhile, there isn't an ergonomic way (AFAICT) to set the required auth headers and
+    //  construct the request myself. one would expect the installation client to do this, but it doesn't.
     let (installation_client, installation_token) =
         app_client.installation_and_token(installation.id).await?;
 
