@@ -6,22 +6,23 @@ use tracing::{debug, info};
 /// Ensures the bare repo exists.
 /// Creates repo_dir/repo.git if it doesn't exist.
 /// Returns path to repo.git.
-pub async fn ensure_repo(repo_dir: &Path, clone_url: &str) -> anyhow::Result<PathBuf> {
+pub async fn ensure_bare_repo(repo_dir: &Path) -> anyhow::Result<PathBuf> {
     let bare_repo = repo_dir.join("repo.git");
 
     if !bare_repo.exists() {
-        info!(path = %bare_repo.display(), "cloning bare repo");
-        tokio::fs::create_dir_all(repo_dir).await?;
+        info!(path = %bare_repo.display(), "initializing bare repo");
+        tokio::fs::create_dir_all(&bare_repo).await?;
 
         let output = Command::new("git")
-            .args(["clone", "--bare", clone_url])
+            .arg("-C")
             .arg(&bare_repo)
+            .args(["init", "--bare"])
             .output()
             .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git clone failed: {stderr}");
+            bail!("git init --bare failed: {stderr}");
         }
     }
 
@@ -29,14 +30,19 @@ pub async fn ensure_repo(repo_dir: &Path, clone_url: &str) -> anyhow::Result<Pat
 }
 
 /// Extracts a commit to a directory using git archive.
-/// Fetches the commit first, then extracts if the directory doesn't exist.
+/// Fetches the commit from the provided URL, then extracts if the directory doesn't exist.
 /// Since directories are SHA-based, an existing directory is already correct.
-pub async fn extract_commit(bare_repo: &Path, dest: &Path, sha: &str) -> anyhow::Result<()> {
-    // Fetch the commit to ensure it's available
+pub async fn extract_commit(
+    bare_repo: &Path,
+    fetch_url: &str,
+    sha: &str,
+    dest: &Path,
+) -> anyhow::Result<()> {
+    // Fetch the commit from URL (no origin dependency)
     let output = Command::new("git")
         .arg("-C")
         .arg(bare_repo)
-        .args(["fetch", "origin", sha])
+        .args(["fetch", fetch_url, sha])
         .output()
         .await?;
 

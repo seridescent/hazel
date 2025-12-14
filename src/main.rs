@@ -30,7 +30,8 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     // TODO: handle installation token expiry
-    //  installation tokens expire after an hour, so the repo origin will be unusable afterward.
+    //  installation tokens expire after an hour. fetch_url is built fresh each prototype run,
+    //  but for a long-running service we need to refresh the token periodically.
     //  there is a function implementing this logic, but it's not public for some reason.
     //  meanwhile, there isn't an ergonomic way (AFAICT) to set the required auth headers and
     //  construct the request myself. one would expect the installation client to do this, but it doesn't.
@@ -38,13 +39,13 @@ async fn main() -> anyhow::Result<()> {
         app_client.installation_and_token(installation.id).await?;
 
     let repo_dir = data_dir.join("repos").join(repo.to_string());
-    let clone_url = format!(
+    let bare_repo = git::ensure_bare_repo(&repo_dir).await?;
+
+    let fetch_url = format!(
         "https://x-access-token:{}@github.com/{}.git",
         installation_token.expose_secret(),
         repo,
     );
-
-    let bare_repo = git::ensure_repo(&repo_dir, &clone_url).await?;
 
     let open_pulls = installation_client
         .pulls(&repo.owner, &repo.name)
@@ -60,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
         info!(pr = pr_number, sha = %head_sha, "processing PR");
 
         let source_dir = repo_dir.join(head_sha);
-        git::extract_commit(&bare_repo, &source_dir, head_sha).await?;
+        git::extract_commit(&bare_repo, &fetch_url, head_sha, &source_dir).await?;
 
         let run_dir = data_dir.join("deploys").join(head_sha);
         tokio::fs::create_dir_all(&run_dir).await?;
