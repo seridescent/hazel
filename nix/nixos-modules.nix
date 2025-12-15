@@ -102,8 +102,10 @@
           path = [ pkgs.git pkgs.tailscale config.nix.package pkgs.gnutar ];
 
           environment = {
+            HOME = cfg.dataDir;
+            XDG_CACHE_HOME = "${cfg.dataDir}/.cache";
             RUST_LOG = "info";
-            HAZEL_DATA_DIR = cfg.dataDir;
+            HAZEL_DATA_DIR = "${cfg.dataDir}/ephemeral";
             GITHUB_APP_ID = toString cfg.githubAppId;
             GITHUB_APP_KEY_PATH = cfg.githubAppKeyPath;
             HAZEL_WATCHED_REPO_OWNER = cfg.watchedRepo.owner;
