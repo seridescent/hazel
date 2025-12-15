@@ -126,11 +126,24 @@ async fn main() -> anyhow::Result<()> {
         kill_deployment(tailscale_proxy_port, &mut deployment).await;
     }
 
+    // Clean up checkouts and deploys (keep repos for git cache)
+    if let Err(e) = tokio::fs::remove_dir_all(data_dir.join("checkouts")).await {
+        warn!(error = ?e, "failed to clean checkouts");
+    }
+    if let Err(e) = tokio::fs::remove_dir_all(data_dir.join("deploys")).await {
+        warn!(error = ?e, "failed to clean deploys");
+    }
+
+    info!("cleanup complete");
     Ok(())
 }
 
 async fn initialize_data_dir() -> anyhow::Result<PathBuf> {
     let data_dir = PathBuf::from(env::var("HAZEL_DATA_DIR").context("HAZEL_DATA_DIR not set")?);
+
+    // Clean up stale checkouts/deploys from previous runs (ignore errors if they don't exist)
+    let _ = tokio::fs::remove_dir_all(data_dir.join("checkouts")).await;
+    let _ = tokio::fs::remove_dir_all(data_dir.join("deploys")).await;
 
     tokio::try_join!(
         tokio::fs::create_dir_all(data_dir.join("repos")),
