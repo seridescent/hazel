@@ -11,7 +11,7 @@
           package = lib.mkOption {
             description = "The hazel service package to use";
             default = withSystem pkgs.stdenv.hostPlatform.system ({ config, ... }:
-              config.packages.hazel
+              config.packages.default
             );
             type = lib.types.package;
           };
