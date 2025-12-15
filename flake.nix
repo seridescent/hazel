@@ -13,7 +13,10 @@
 
   outputs = inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
-      imports = [ ./rust.nix ];
+      imports = [
+        ./rust.nix
+        ./nix/nixos-modules.nix
+      ];
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
       perSystem = { config, self', inputs', pkgs, system, ... }: {
         # https://flake.parts/overlays.html
