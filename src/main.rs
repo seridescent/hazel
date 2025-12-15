@@ -28,7 +28,10 @@ async fn main() -> anyhow::Result<()> {
 
     clear_tailscale_serve(tailscale_proxy_port).await?;
 
-    let repo = Repo::new("seridescent", "hazel-test-repo");
+    // intentionally just watching one repository because YAGNI,
+    // but it wouldn't be hard to generalize this to just query for
+    // repositories where the app is installed.
+    let repo = initialize_watched_repo()?;
     let installation = initialize_installation(&app_client, repo.clone()).await?;
 
     let repo_dir = data_dir.join("repos").join(repo.to_string());
@@ -226,4 +229,11 @@ fn initialize_poll_interval() -> anyhow::Result<Duration> {
         .context("HAZEL_POLL_INTERVAL_SECS must be a number")?;
 
     Ok(Duration::from_secs(secs))
+}
+
+fn initialize_watched_repo() -> anyhow::Result<Repo> {
+    let owner = env::var("HAZEL_WATCHED_REPO_OWNER").context("HAZEL_WATCHED_REPO_OWNER not set")?;
+    let name = env::var("HAZEL_WATCHED_REPO_NAME").context("HAZEL_WATCHED_REPO_NAME not set")?;
+
+    Ok(Repo::new(owner, name))
 }
