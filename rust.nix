@@ -72,6 +72,8 @@
 
         shellHook = ''
           # For rust-analyzer 'hover' tooltips to work.
+          # shell hook because setting the attribute doesn't work for me and i'm too
+          # lazy to figure out why.
           export RUST_SRC_PATH="${toolchainForPkgs pkgs}/lib/rustlib/src/rust/library";
         '';
       };
