@@ -99,6 +99,7 @@
         systemd.services.hazel = {
           description = "Hazel PR preview deployment service";
           wantedBy = [ "multi-user.target" ];
+          path = [ pkgs.git pkgs.tailscale config.nix.package pkgs.gnutar ];
 
           environment = {
             RUST_LOG = "info";
