@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, bail};
 use hazel::{
     Repo, Sha,
     deploy::{Deployment, clear_tailscale_serve, deploy_sha, kill_deployment},
@@ -7,6 +7,7 @@ use hazel::{
     port_allocator::PortAllocator,
 };
 use octocrab::{Octocrab, models::AppId};
+use serde::Deserialize;
 use std::{collections::HashMap, env, path::PathBuf, time::Duration};
 use tokio::task::JoinSet;
 use tracing::{info, warn};
@@ -25,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
     let mut port_allocator = initialize_port_allocator()?;
     let tailscale_proxy_port = initialize_tailscale_proxy_port()?;
     let poll_interval = initialize_poll_interval()?;
+    let tailscale_hostname = get_tailscale_hostname().await?;
 
     clear_tailscale_serve(tailscale_proxy_port).await?;
 
@@ -53,19 +55,20 @@ async fn main() -> anyhow::Result<()> {
 
         let new_targets: Vec<_> = targets
             .iter()
-            .filter(|(sha, _)| !deployments.contains_key(sha))
+            .filter(|t| !deployments.contains_key(&t.sha))
             .collect();
 
         if !new_targets.is_empty() {
             info!(count = new_targets.len(), "deploying new targets");
 
-            let mut set = JoinSet::new();
-            for (sha, fetch_url) in new_targets {
+            let mut set: JoinSet<anyhow::Result<(Deployment, u64)>> = JoinSet::new();
+            for target in new_targets {
                 let port = port_allocator.allocate()?;
                 let bare_repo = bare_repo.clone();
                 let data_dir = data_dir.clone();
-                let sha = sha.clone();
-                let fetch_url = fetch_url.clone();
+                let sha = target.sha.clone();
+                let fetch_url = target.fetch_url.clone();
+                let pr_number = target.pr_number;
 
                 set.spawn(async move {
                     let checkout_dir = data_dir.join("checkouts").join(sha.as_str());
@@ -78,14 +81,29 @@ async fn main() -> anyhow::Result<()> {
                     .await?;
 
                     let run_dir = data_dir.join("deploys").join(sha.as_str());
-                    deploy_sha(&sha, &checkout_dir, &run_dir, port, tailscale_proxy_port).await
+                    let deployment =
+                        deploy_sha(&sha, &checkout_dir, &run_dir, port, tailscale_proxy_port)
+                            .await?;
+                    Ok((deployment, pr_number))
                 });
             }
 
             while let Some(result) = set.join_next().await {
                 match result {
-                    Ok(Ok(deployment)) => {
+                    Ok(Ok((deployment, pr_number))) => {
                         info!(sha = %deployment.sha, port = deployment.port, "deployment succeeded");
+
+                        let preview_url = format!(
+                            "http://{}:{}/{}/",
+                            tailscale_hostname, tailscale_proxy_port, deployment.sha
+                        );
+                        if let Err(e) = installation
+                            .upsert_deploy_comment(pr_number, &preview_url)
+                            .await
+                        {
+                            warn!(error = ?e, pr = pr_number, "failed to post deploy comment");
+                        }
+
                         deployments.insert(deployment.sha.clone(), deployment);
                     }
                     Ok(Err(e)) => {
@@ -98,8 +116,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        let target_shas: std::collections::HashSet<_> =
-            targets.iter().map(|(sha, _)| sha).collect();
+        let target_shas: std::collections::HashSet<_> = targets.iter().map(|t| &t.sha).collect();
         for sha in deployments
             .keys()
             .filter(|sha| !target_shas.contains(sha))
@@ -236,4 +253,46 @@ fn initialize_watched_repo() -> anyhow::Result<Repo> {
     let name = env::var("HAZEL_WATCHED_REPO_NAME").context("HAZEL_WATCHED_REPO_NAME not set")?;
 
     Ok(Repo::new(owner, name))
+}
+
+async fn get_tailscale_hostname() -> anyhow::Result<String> {
+    #[derive(Deserialize)]
+    struct TailscaleStatus {
+        #[serde(rename = "Self")]
+        self_node: SelfNode,
+    }
+
+    #[derive(Deserialize)]
+    struct SelfNode {
+        #[serde(rename = "DNSName")]
+        dns_name: String,
+    }
+
+    let output = tokio::process::Command::new("tailscale")
+        .args(["status", "--self", "--json"])
+        .output()
+        .await
+        .context("failed to run tailscale status")?;
+
+    if !output.status.success() {
+        bail!(
+            "tailscale status failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let status: TailscaleStatus =
+        serde_json::from_slice(&output.stdout).context("failed to parse tailscale status")?;
+
+    // DNSName looks like "hostname.tail1234.ts.net." - extract just the hostname
+    let hostname = status
+        .self_node
+        .dns_name
+        .trim_end_matches('.')
+        .split('.')
+        .next()
+        .context("invalid DNSName format")?
+        .to_string();
+
+    Ok(hostname)
 }

@@ -7,6 +7,14 @@ use tracing::debug;
 
 use crate::{FetchUrl, Repo, Sha, cached_token::CachedToken};
 
+/// A PR deployment target with all info needed to deploy and comment.
+#[derive(Debug, Clone)]
+pub struct DeployTarget {
+    pub sha: Sha,
+    pub fetch_url: FetchUrl,
+    pub pr_number: u64,
+}
+
 /// Wraps an installation client with token caching and repo access.
 pub struct Installation {
     pub client: Octocrab,
@@ -53,11 +61,11 @@ impl Installation {
         Ok(secret)
     }
 
-    /// Get (Sha, FetchUrl) pairs for open PRs in this installation's repo.
+    /// Get deploy targets for open PRs in this installation's repo.
     pub async fn fetch_deploy_targets(
         &self,
         app_client: &Octocrab,
-    ) -> anyhow::Result<Vec<(Sha, FetchUrl)>> {
+    ) -> anyhow::Result<Vec<DeployTarget>> {
         let token = self.ensure_token(app_client).await?;
         let fetch_url = FetchUrl::new(format!(
             "https://x-access-token:{}@github.com/{}.git",
@@ -77,7 +85,48 @@ impl Installation {
         Ok(pulls
             .items
             .into_iter()
-            .map(|pull| (Sha::new(pull.head.sha), fetch_url.clone()))
+            .map(|pull| DeployTarget {
+                sha: Sha::new(pull.head.sha),
+                fetch_url: fetch_url.clone(),
+                pr_number: pull.number,
+            })
             .collect())
+    }
+
+    /// Create or update the deploy preview comment on a PR.
+    pub async fn upsert_deploy_comment(&self, pr_number: u64, url: &str) -> anyhow::Result<()> {
+        const MARKER: &str = "<!-- hazel-deploy -->";
+        let body = format!("{MARKER}\n🚀 Preview: {url}");
+
+        let comments = self
+            .client
+            .issues(&self.repo.owner, &self.repo.name)
+            .list_comments(pr_number)
+            .send()
+            .await
+            .context("failed to list PR comments")?;
+
+        let existing = comments
+            .items
+            .iter()
+            .find(|c| c.body.as_ref().is_some_and(|b| b.contains(MARKER)));
+
+        if let Some(comment) = existing {
+            self.client
+                .issues(&self.repo.owner, &self.repo.name)
+                .update_comment(comment.id, body)
+                .await
+                .context("failed to update deploy comment")?;
+            debug!(pr = pr_number, "updated deploy comment");
+        } else {
+            self.client
+                .issues(&self.repo.owner, &self.repo.name)
+                .create_comment(pr_number, body)
+                .await
+                .context("failed to create deploy comment")?;
+            debug!(pr = pr_number, "created deploy comment");
+        }
+
+        Ok(())
     }
 }
