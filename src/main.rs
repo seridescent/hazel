@@ -41,6 +41,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut deployments: HashMap<Sha, Deployment> = HashMap::new();
 
+    // choosing to do the silly thing and poll because i don't feel like
+    // setting up a webhook receiver.
     loop {
         let targets = match installation.fetch_deploy_targets(&app_client).await {
             Ok(t) => t,
