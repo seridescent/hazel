@@ -72,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
                 let fetch_url = target.fetch_url.clone();
                 let pr_number = target.pr_number;
 
+                let tailscale_hostname = tailscale_hostname.clone();
                 set.spawn(async move {
                     let checkout_dir = data_dir.join("checkouts").join(sha.as_str());
                     git::extract_commit(
@@ -84,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
 
                     let run_dir = data_dir.join("deploys").join(sha.as_str());
                     let deployment =
-                        deploy_sha(&sha, &checkout_dir, &run_dir, port, tailscale_proxy_port)
+                        deploy_sha(&sha, &checkout_dir, &run_dir, port, &tailscale_hostname, tailscale_proxy_port)
                             .await?;
                     Ok((deployment, pr_number))
                 });

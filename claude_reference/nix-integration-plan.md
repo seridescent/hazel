@@ -60,8 +60,11 @@
                     
           # RELEVANT MODULE CONFIG EXAMPLE HERE
           hazel.deploy = {
-            # hazel will expose two relevant env vars for consumption:
-            # HAZEL_PORT and HAZEL_RUN_DIR
+            # hazel will expose these env vars for consumption:
+            # - HAZEL_PORT: the port the service should listen on
+            # - HAZEL_RUN_DIR: the working directory for the service
+            # - HAZEL_ORIGIN: the origin URL (e.g., http://hostname:port)
+            # - HAZEL_BASE_PATH: the base path for the deploy (e.g., /<sha>)
             
             # a user-defined script that runs before the service is started
             # this script will have access to HAZEL_RUN_DIR so that the user
