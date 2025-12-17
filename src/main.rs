@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use hazel::{
     Repo, Sha,
-    deploy::{Deployment, clear_tailscale_serve, deploy_sha, kill_deployment},
+    deploy::{Deployment, deploy_sha, kill_deployment},
     git,
     installation::Installation,
     port_allocator::PortAllocator,
@@ -24,11 +24,8 @@ async fn main() -> anyhow::Result<()> {
     let data_dir = initialize_data_dir().await?;
     let app_client = initialize_app_client().await?;
     let mut port_allocator = initialize_port_allocator()?;
-    let tailscale_proxy_port = initialize_tailscale_proxy_port()?;
     let poll_interval = initialize_poll_interval()?;
     let tailscale_hostname = get_tailscale_hostname().await?;
-
-    clear_tailscale_serve(tailscale_proxy_port).await?;
 
     // intentionally just watching one repository because YAGNI,
     // but it wouldn't be hard to generalize this to just query for
@@ -85,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
 
                     let run_dir = data_dir.join("deploys").join(sha.as_str());
                     let deployment =
-                        deploy_sha(&sha, &checkout_dir, &run_dir, port, &tailscale_hostname, tailscale_proxy_port)
+                        deploy_sha(&sha, &checkout_dir, &run_dir, port, &tailscale_hostname)
                             .await?;
                     Ok((deployment, pr_number))
                 });
@@ -96,9 +93,10 @@ async fn main() -> anyhow::Result<()> {
                     Ok(Ok((deployment, pr_number))) => {
                         info!(sha = %deployment.sha, port = deployment.port, "deployment succeeded");
 
+                        // Direct MagicDNS URL with the allocated port
                         let preview_url = format!(
-                            "http://{}:{}/{}/",
-                            tailscale_hostname, tailscale_proxy_port, deployment.sha
+                            "http://{}:{}/",
+                            tailscale_hostname, deployment.port
                         );
                         if let Err(e) = installation
                             .upsert_deploy_comment(pr_number, &preview_url)
@@ -127,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
             .collect::<Vec<_>>()
         {
             if let Some(mut deployment) = deployments.remove(&sha) {
-                kill_deployment(tailscale_proxy_port, &mut deployment).await;
+                kill_deployment(&mut deployment).await;
                 port_allocator.release(deployment.port);
             }
         }
@@ -146,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("shutting down");
     for (_, mut deployment) in deployments {
-        kill_deployment(tailscale_proxy_port, &mut deployment).await;
+        kill_deployment(&mut deployment).await;
     }
 
     // Clean up checkouts and deploys (keep repos for git cache)
@@ -233,13 +231,6 @@ fn initialize_port_allocator() -> anyhow::Result<PortAllocator> {
         .context("HAZEL_PORT_MAX must be a number")?;
 
     Ok(PortAllocator::new(port_min, port_max))
-}
-
-fn initialize_tailscale_proxy_port() -> anyhow::Result<u16> {
-    env::var("HAZEL_TAILSCALE_PROXY_PORT")
-        .context("HAZEL_TAILSCALE_PROXY_PORT not set")?
-        .parse()
-        .context("HAZEL_TAILSCALE_PROXY_PORT must be a number")
 }
 
 fn initialize_poll_interval() -> anyhow::Result<Duration> {
