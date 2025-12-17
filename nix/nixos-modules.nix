@@ -102,8 +102,11 @@
           path = [ pkgs.git pkgs.tailscale config.nix.package pkgs.gnutar ];
 
           environment = {
+            # nicer to have a place for the service user's nix cache
             HOME = cfg.dataDir;
             XDG_CACHE_HOME = "${cfg.dataDir}/.cache";
+
+            # application configuration
             RUST_LOG = "info";
             HAZEL_DATA_DIR = "${cfg.dataDir}/ephemeral";
             GITHUB_APP_ID = toString cfg.githubAppId;

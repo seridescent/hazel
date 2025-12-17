@@ -7,6 +7,8 @@
 # Environment variables provided by hazel at runtime:
 #   - HAZEL_PORT: The port the service should listen on
 #   - HAZEL_RUN_DIR: Working directory for the service
+#   - HAZEL_ORIGIN: The origin URL (e.g., http://hostname:port)
+#   - HAZEL_BASE_PATH: The base path for the deploy (e.g., /<sha>)
 { lib, flake-parts-lib, ... }:
 let
   inherit (lib) mkOption mkEnableOption types mkIf;
@@ -27,8 +29,9 @@ in
           default = "";
           description = ''
             Script to run before the service is started.
-            Has access to HAZEL_RUN_DIR for populating the working directory
-            with external data (e.g., fixture data, env files).
+            Has access to HAZEL_RUN_DIR, HAZEL_ORIGIN, and HAZEL_BASE_PATH
+            for populating the working directory with external data
+            (e.g., fixture data, env files).
           '';
         };
 
@@ -37,6 +40,7 @@ in
           description = ''
             A derivation that serves as the start script for the service.
             Should be runnable via `nix run` and respect HAZEL_PORT for binding.
+            Also has access to HAZEL_RUN_DIR, HAZEL_ORIGIN, and HAZEL_BASE_PATH.
             Typically created with pkgs.writeShellApplication.
           '';
         };

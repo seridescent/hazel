@@ -93,15 +93,21 @@ pub async fn deploy_sha(
     checkout_dir: &Path,
     run_dir: &Path,
     port: u16,
+    tailscale_hostname: &str,
     tailscale_proxy_port: u16,
 ) -> anyhow::Result<Deployment> {
     tokio::fs::create_dir_all(run_dir).await?;
 
     info!(sha = %sha, port = port, "starting deployment");
 
+    let origin = format!("http://{}:{}", tailscale_hostname, tailscale_proxy_port);
+    let base_path = format!("/{}", sha);
+
     let pre_start_status = Command::new("nix")
         .args(["run", &format!("{}#hazel-preStart", checkout_dir.display())])
         .env("HAZEL_RUN_DIR", run_dir)
+        .env("HAZEL_ORIGIN", &origin)
+        .env("HAZEL_BASE_PATH", &base_path)
         .current_dir(run_dir)
         .status()
         .await
@@ -122,6 +128,8 @@ pub async fn deploy_sha(
         ])
         .env("HAZEL_PORT", port.to_string())
         .env("HAZEL_RUN_DIR", run_dir)
+        .env("HAZEL_ORIGIN", &origin)
+        .env("HAZEL_BASE_PATH", &base_path)
         .current_dir(run_dir)
         .spawn()
         .context("failed to spawn executable")?;
