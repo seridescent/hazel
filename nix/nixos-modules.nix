@@ -70,12 +70,6 @@
             };
           };
 
-          tailscaleProxyPort = lib.mkOption {
-            description = "Port for tailscale serve reverse proxy";
-            type = lib.types.port;
-            default = 8080;
-          };
-
           pollIntervalSecs = lib.mkOption {
             description = "Polling interval in seconds";
             type = lib.types.int;
@@ -115,7 +109,6 @@
             HAZEL_WATCHED_REPO_NAME = cfg.watchedRepo.name;
             HAZEL_PORT_MIN = toString cfg.portRange.min;
             HAZEL_PORT_MAX = toString cfg.portRange.max;
-            HAZEL_TAILSCALE_PROXY_PORT = toString cfg.tailscaleProxyPort;
             HAZEL_POLL_INTERVAL_SECS = toString cfg.pollIntervalSecs;
           };
 
