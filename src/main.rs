@@ -10,7 +10,7 @@ use octocrab::{Octocrab, models::AppId};
 use serde::Deserialize;
 use std::{collections::HashMap, env, path::PathBuf, time::Duration};
 use tokio::task::JoinSet;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -37,6 +37,12 @@ async fn main() -> anyhow::Result<()> {
     let bare_repo = git::ensure_bare_repo(&repo_dir).await?;
 
     let mut deployments: HashMap<Sha, Deployment> = HashMap::new();
+
+    info!(
+        repo = %repo,
+        poll_interval_secs = poll_interval.as_secs(),
+        "hazel started"
+    );
 
     // choosing to do the silly thing and poll because i don't feel like
     // setting up a webhook receiver.
@@ -130,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        info!(
+        debug!(
             active = deployments.len(),
             targets = targets.len(),
             "poll complete"
