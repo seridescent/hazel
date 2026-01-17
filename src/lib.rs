@@ -1,8 +1,8 @@
 pub mod cached_token;
-pub mod deploy;
 pub mod git;
 pub mod installation;
 pub mod port_allocator;
+pub mod staging;
 
 use std::fmt;
 
