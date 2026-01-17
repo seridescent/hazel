@@ -75,6 +75,27 @@
             type = lib.types.int;
             default = 30;
           };
+
+          production = {
+            enable = lib.mkEnableOption "production deployment";
+
+            runDir = lib.mkOption {
+              description = "Persistent directory for production deployment runtime data (HAZEL_RUN_DIR). This directory persists between deployments for SQLite state, etc.";
+              type = lib.types.path;
+              example = "/var/lib/myapp-production";
+            };
+
+            branch = lib.mkOption {
+              description = "Branch to watch for production deployment";
+              type = lib.types.str;
+              default = "main";
+            };
+
+            port = lib.mkOption {
+              description = "Fixed port for production deployment";
+              type = lib.types.port;
+            };
+          };
         };
       };
 
@@ -89,6 +110,11 @@
         users.groups = lib.mkIf (cfg.group == "hazel") {
           hazel = { };
         };
+
+        # Ensure production runDir exists with proper ownership
+        systemd.tmpfiles.rules = lib.mkIf cfg.production.enable [
+          "d ${cfg.production.runDir} 0755 ${cfg.user} ${cfg.group} -"
+        ];
 
         systemd.services.hazel = {
           description = "Hazel PR preview deployment service";
@@ -110,6 +136,11 @@
             HAZEL_PORT_MIN = toString cfg.portRange.min;
             HAZEL_PORT_MAX = toString cfg.portRange.max;
             HAZEL_POLL_INTERVAL_SECS = toString cfg.pollIntervalSecs;
+          } // lib.optionalAttrs cfg.production.enable {
+            HAZEL_PRODUCTION_ENABLE = "true";
+            HAZEL_PRODUCTION_RUN_DIR = cfg.production.runDir;
+            HAZEL_PRODUCTION_BRANCH = cfg.production.branch;
+            HAZEL_PRODUCTION_PORT = toString cfg.production.port;
           };
 
           serviceConfig = {
