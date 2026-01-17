@@ -1,24 +1,19 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio::process::Child;
-use tracing::info;
 
 use crate::Sha;
-use crate::deploy::{DeployConfig, deploy, kill_process};
+use crate::deploy::{build_derivation, kill_process, run_deployment};
 
 pub struct StagingDeployment {
     pub sha: Sha,
     pub port: u16,
     pub process: Child,
-    pub executable_store_path: PathBuf,
 }
 
-/// Kills a staging deployment's process.
 pub async fn kill_staging(deployment: &mut StagingDeployment) {
-    info!(sha = %deployment.sha, port = deployment.port, "killing staging deployment");
     kill_process(&mut deployment.process).await;
 }
 
-/// Deploys a staging preview for a single SHA. Returns a StagingDeployment on success.
 pub async fn deploy_staging(
     sha: &Sha,
     checkout_dir: &Path,
@@ -26,26 +21,22 @@ pub async fn deploy_staging(
     port: u16,
     tailscale_hostname: &str,
 ) -> anyhow::Result<StagingDeployment> {
-    info!(sha = %sha, port = port, "starting staging deployment");
+    build_derivation(checkout_dir, "hazel-preStart").await?;
+    build_derivation(checkout_dir, "hazel-executable").await?;
 
-    let origin = format!("http://{}:{}", tailscale_hostname, port);
-
-    let result = deploy(DeployConfig {
+    let process = run_deployment(
         checkout_dir,
         run_dir,
+        tailscale_hostname,
         port,
-        origin: &origin,
-        pre_start_attr: Some("hazel-preStart"),
-        executable_attr: "hazel-executable",
-    })
+        "hazel-preStart",
+        "hazel-executable",
+    )
     .await?;
-
-    info!(sha = %sha, port = port, pid = ?result.process.id(), "staging deployment started");
 
     Ok(StagingDeployment {
         sha: sha.clone(),
         port,
-        process: result.process,
-        executable_store_path: result.executable_store_path,
+        process,
     })
 }

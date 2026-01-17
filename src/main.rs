@@ -1,10 +1,9 @@
 use anyhow::{Context, bail};
 use hazel::{
-    Repo, Sha,
-    git,
+    Repo, Sha, git,
     installation::Installation,
     port_allocator::PortAllocator,
-    production::{ProductionDeployment, deploy_production, kill_production},
+    production::{ProductionDeployment, build_production, kill_production, run_production},
     staging::{StagingDeployment, deploy_staging, kill_staging},
 };
 use octocrab::{Octocrab, models::AppId};
@@ -40,9 +39,8 @@ async fn main() -> anyhow::Result<()> {
     let production_port: Option<u16> = env::var("HAZEL_PRODUCTION_PORT")
         .ok()
         .and_then(|p| p.parse().ok());
-    let production_run_dir: Option<PathBuf> = env::var("HAZEL_PRODUCTION_RUN_DIR")
-        .ok()
-        .map(PathBuf::from);
+    let production_run_dir: Option<PathBuf> =
+        env::var("HAZEL_PRODUCTION_RUN_DIR").ok().map(PathBuf::from);
 
     let repo_dir = data_dir.join("repos").join(repo.to_string());
     let bare_repo = git::ensure_bare_repo(&repo_dir).await?;
@@ -111,11 +109,8 @@ async fn main() -> anyhow::Result<()> {
                     Ok(Ok((deployment, pr_number))) => {
                         info!(sha = %deployment.sha, port = deployment.port, "staging deployment succeeded");
 
-                        // Direct MagicDNS URL with the allocated port
-                        let preview_url = format!(
-                            "http://{}:{}/",
-                            tailscale_hostname, deployment.port
-                        );
+                        let preview_url =
+                            format!("http://{}:{}/", tailscale_hostname, deployment.port);
                         if let Err(e) = installation
                             .upsert_deploy_comment(pr_number, &preview_url)
                             .await
@@ -190,31 +185,37 @@ async fn main() -> anyhow::Result<()> {
                         {
                             warn!(error = ?e, sha = %branch_sha, "failed to extract production commit");
                         } else {
-                            // Kill old deployment if exists
-                            if let Some(mut old) = production_deployment.take() {
-                                kill_production(&mut old).await;
-                            }
+                            match build_production(&checkout_dir).await {
+                                Ok(_) => {
+                                    // Kill old deployment now that new is built
+                                    if let Some(mut old) = production_deployment.take() {
+                                        kill_production(&mut old).await;
+                                    }
 
-                            // Deploy new
-                            match deploy_production(
-                                &branch_sha,
-                                &checkout_dir,
-                                production_run_dir,
-                                production_port,
-                                &tailscale_hostname,
-                            )
-                            .await
-                            {
-                                Ok(deployment) => {
-                                    info!(
-                                        sha = %deployment.sha,
-                                        port = production_port,
-                                        "production deployment succeeded"
-                                    );
-                                    production_deployment = Some(deployment);
+                                    match run_production(
+                                        &branch_sha,
+                                        &checkout_dir,
+                                        production_run_dir,
+                                        production_port,
+                                        &tailscale_hostname,
+                                    )
+                                    .await
+                                    {
+                                        Ok(deployment) => {
+                                            info!(
+                                                sha = %deployment.sha,
+                                                port = production_port,
+                                                "production deployment succeeded"
+                                            );
+                                            production_deployment = Some(deployment);
+                                        }
+                                        Err(e) => {
+                                            warn!(error = ?e, sha = %branch_sha, "production deployment failed");
+                                        }
+                                    }
                                 }
                                 Err(e) => {
-                                    warn!(error = ?e, sha = %branch_sha, "production deployment failed");
+                                    warn!(error = ?e, sha = %branch_sha, "production build failed");
                                 }
                             }
                         }
