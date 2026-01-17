@@ -58,13 +58,13 @@
 
           portRange = {
             min = lib.mkOption {
-              description = "Minimum port for deploy allocations";
+              description = "Minimum port for staging allocations";
               type = lib.types.port;
               default = 50000;
             };
 
             max = lib.mkOption {
-              description = "Maximum port for deploy allocations";
+              description = "Maximum port for staging allocations";
               type = lib.types.port;
               default = 50100;
             };

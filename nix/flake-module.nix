@@ -1,7 +1,7 @@
 # Hazel flake-parts module
 #
 # Provides options for configuring PR staging deploys and production deploys.
-# Users define `hazel.deploy` with preStart script and executable for PR previews,
+# Users define `hazel.staging` with preStart script and executable for PR previews,
 # and `hazel.production` with just an executable for production deployments.
 # The module exposes wrapped packages for hazel to invoke via `nix run`.
 #
@@ -17,14 +17,14 @@ in
 {
   options.perSystem = mkPerSystemOption ({ config, pkgs, ... }:
     let
-      deployCfg = config.hazel.deploy;
-      deployEnabled = deployCfg.enable;
+      stagingCfg = config.hazel.staging;
+      stagingEnabled = stagingCfg.enable;
       productionCfg = config.hazel.production;
       productionEnabled = productionCfg.enable;
     in
     {
-      options.hazel.deploy = {
-        enable = mkEnableOption "hazel deploy configuration for PR previews";
+      options.hazel.staging = {
+        enable = mkEnableOption "hazel staging configuration for PR previews";
 
         preStart = mkOption {
           type = types.lines;
@@ -62,52 +62,52 @@ in
       };
 
       config = {
-        packages = {}
+        packages = { }
           # PR preview packages
-          // (mkIf deployEnabled {
-            hazel-preStart = pkgs.writeShellApplication {
-              name = "hazel-preStart";
-              text = ''
-                if [ -z "''${HAZEL_RUN_DIR:-}" ]; then
-                  echo "Error: HAZEL_RUN_DIR is not set" >&2
-                  exit 1
-                fi
-                ${deployCfg.preStart}
-              '';
-            };
+          // (mkIf stagingEnabled {
+          hazel-preStart = pkgs.writeShellApplication {
+            name = "hazel-preStart";
+            text = ''
+              if [ -z "''${HAZEL_RUN_DIR:-}" ]; then
+                echo "Error: HAZEL_RUN_DIR is not set" >&2
+                exit 1
+              fi
+              ${stagingCfg.preStart}
+            '';
+          };
 
-            hazel-executable = pkgs.writeShellApplication {
-              name = "hazel-executable";
-              text = ''
-                if [ -z "''${HAZEL_RUN_DIR:-}" ]; then
-                  echo "Error: HAZEL_RUN_DIR is not set" >&2
-                  exit 1
-                fi
-                if [ -z "''${HAZEL_PORT:-}" ]; then
-                  echo "Error: HAZEL_PORT is not set" >&2
-                  exit 1
-                fi
-                exec ${deployCfg.executable}/bin/${deployCfg.executable.name}
-              '';
-            };
-          })
+          hazel-executable = pkgs.writeShellApplication {
+            name = "hazel-executable";
+            text = ''
+              if [ -z "''${HAZEL_RUN_DIR:-}" ]; then
+                echo "Error: HAZEL_RUN_DIR is not set" >&2
+                exit 1
+              fi
+              if [ -z "''${HAZEL_PORT:-}" ]; then
+                echo "Error: HAZEL_PORT is not set" >&2
+                exit 1
+              fi
+              exec ${stagingCfg.executable}/bin/${stagingCfg.executable.name}
+            '';
+          };
+        })
           # Production packages
           // (mkIf productionEnabled {
-            hazel-production-executable = pkgs.writeShellApplication {
-              name = "hazel-production-executable";
-              text = ''
-                if [ -z "''${HAZEL_RUN_DIR:-}" ]; then
-                  echo "Error: HAZEL_RUN_DIR is not set" >&2
-                  exit 1
-                fi
-                if [ -z "''${HAZEL_PORT:-}" ]; then
-                  echo "Error: HAZEL_PORT is not set" >&2
-                  exit 1
-                fi
-                exec ${productionCfg.executable}/bin/${productionCfg.executable.name}
-              '';
-            };
-          });
+          hazel-production-executable = pkgs.writeShellApplication {
+            name = "hazel-production-executable";
+            text = ''
+              if [ -z "''${HAZEL_RUN_DIR:-}" ]; then
+                echo "Error: HAZEL_RUN_DIR is not set" >&2
+                exit 1
+              fi
+              if [ -z "''${HAZEL_PORT:-}" ]; then
+                echo "Error: HAZEL_PORT is not set" >&2
+                exit 1
+              fi
+              exec ${productionCfg.executable}/bin/${productionCfg.executable.name}
+            '';
+          };
+        });
       };
     });
 }
