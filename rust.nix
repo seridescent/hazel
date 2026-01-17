@@ -1,6 +1,6 @@
 { inputs, ... }:
 {
-  perSystem = { config, self', pkgs, lib, ... }:
+  perSystem = { self', pkgs, lib, ... }:
     let
       toolchainForPkgs = p:
         p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;

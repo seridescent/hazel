@@ -10,7 +10,7 @@ use octocrab::{Octocrab, models::AppId};
 use serde::Deserialize;
 use std::{collections::HashMap, env, path::PathBuf, time::Duration};
 use tokio::task::JoinSet;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
