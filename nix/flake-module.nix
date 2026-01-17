@@ -10,24 +10,18 @@
 #   - HAZEL_RUN_DIR: Working directory for the service
 #   - HAZEL_ORIGIN: The full origin URL (e.g., http://hostname:50001)
 { lib, flake-parts-lib, ... }:
-let
-  inherit (lib) mkOption mkEnableOption types mkIf;
-  inherit (flake-parts-lib) mkPerSystemOption;
-in
 {
-  options.perSystem = mkPerSystemOption ({ config, pkgs, ... }:
+  options.perSystem = flake-parts-lib.mkPerSystemOption ({ config, pkgs, ... }:
     let
       stagingCfg = config.hazel.staging;
-      stagingEnabled = stagingCfg.enable;
       productionCfg = config.hazel.production;
-      productionEnabled = productionCfg.enable;
     in
     {
       options.hazel.staging = {
-        enable = mkEnableOption "hazel staging configuration for PR previews";
+        enable = lib.mkEnableOption "hazel staging configuration for PR previews";
 
-        preStart = mkOption {
-          type = types.lines;
+        preStart = lib.mkOption {
+          type = lib.types.lines;
           default = "";
           description = ''
             Script to run before the service is started.
@@ -36,8 +30,8 @@ in
           '';
         };
 
-        executable = mkOption {
-          type = types.package;
+        executable = lib.mkOption {
+          type = lib.types.package;
           description = ''
             A derivation that serves as the start script for the service.
             Should be runnable via `nix run` and respect HAZEL_PORT for binding.
@@ -48,10 +42,10 @@ in
       };
 
       options.hazel.production = {
-        enable = mkEnableOption "hazel production deployment configuration";
+        enable = lib.mkEnableOption "hazel production deployment configuration";
 
-        executable = mkOption {
-          type = types.package;
+        executable = lib.mkOption {
+          type = lib.types.package;
           description = ''
             A derivation that serves as the start script for the production service.
             Should be runnable via `nix run` and respect HAZEL_PORT for binding.
@@ -61,11 +55,9 @@ in
         };
       };
 
-      config = {
-        packages = { }
-          # PR preview packages
-          // (mkIf stagingEnabled {
-          hazel-preStart = pkgs.writeShellApplication {
+      config = lib.mkMerge [
+        (lib.mkIf stagingCfg.enable {
+          packages.hazel-preStart = pkgs.writeShellApplication {
             name = "hazel-preStart";
             text = ''
               if [ -z "''${HAZEL_RUN_DIR:-}" ]; then
@@ -76,7 +68,7 @@ in
             '';
           };
 
-          hazel-executable = pkgs.writeShellApplication {
+          packages.hazel-executable = pkgs.writeShellApplication {
             name = "hazel-executable";
             text = ''
               if [ -z "''${HAZEL_RUN_DIR:-}" ]; then
@@ -91,9 +83,9 @@ in
             '';
           };
         })
-          # Production packages
-          // (mkIf productionEnabled {
-          hazel-production-executable = pkgs.writeShellApplication {
+
+        (lib.mkIf productionCfg.enable {
+          packages.hazel-production-executable = pkgs.writeShellApplication {
             name = "hazel-production-executable";
             text = ''
               if [ -z "''${HAZEL_RUN_DIR:-}" ]; then
@@ -107,7 +99,7 @@ in
               exec ${productionCfg.executable}/bin/${productionCfg.executable.name}
             '';
           };
-        });
-      };
+        })
+      ];
     });
 }
