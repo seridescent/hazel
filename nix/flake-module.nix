@@ -44,6 +44,15 @@
       options.hazel.production = {
         enable = lib.mkEnableOption "hazel production deployment configuration";
 
+        preStart = lib.mkOption {
+          type = lib.types.lines;
+          default = "";
+          description = ''
+            Script to run before the production service is started.
+            Has access to HAZEL_RUN_DIR (persistent) and HAZEL_ORIGIN.
+          '';
+        };
+
         executable = lib.mkOption {
           type = lib.types.package;
           description = ''
@@ -85,6 +94,17 @@
         })
 
         (lib.mkIf productionCfg.enable {
+          packages.hazel-production-preStart = pkgs.writeShellApplication {
+            name = "hazel-production-preStart";
+            text = ''
+              if [ -z "''${HAZEL_RUN_DIR:-}" ]; then
+                echo "Error: HAZEL_RUN_DIR is not set" >&2
+                exit 1
+              fi
+              ${productionCfg.preStart}
+            '';
+          };
+
           packages.hazel-production-executable = pkgs.writeShellApplication {
             name = "hazel-production-executable";
             text = ''
