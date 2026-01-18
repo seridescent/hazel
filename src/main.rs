@@ -1,10 +1,10 @@
 use anyhow::{Context, bail};
 use hazel::{
-    Repo, Sha,
-    deploy::{Deployment, deploy_sha, kill_deployment},
-    git,
+    Repo, Sha, git,
     installation::Installation,
     port_allocator::PortAllocator,
+    production::{ProductionDeployment, build_production, kill_production, run_production},
+    staging::{StagingDeployment, deploy_staging, kill_staging},
 };
 use octocrab::{Octocrab, models::AppId};
 use serde::Deserialize;
@@ -33,10 +33,20 @@ async fn main() -> anyhow::Result<()> {
     let repo = initialize_watched_repo()?;
     let installation = initialize_installation(&app_client, repo.clone()).await?;
 
+    // Production config - all optional, only enabled if HAZEL_PRODUCTION_ENABLE=true
+    let production_enabled = env::var("HAZEL_PRODUCTION_ENABLE").ok().as_deref() == Some("true");
+    let production_branch = env::var("HAZEL_PRODUCTION_BRANCH").unwrap_or_else(|_| "main".into());
+    let production_port: Option<u16> = env::var("HAZEL_PRODUCTION_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok());
+    let production_run_dir: Option<PathBuf> =
+        env::var("HAZEL_PRODUCTION_RUN_DIR").ok().map(PathBuf::from);
+
     let repo_dir = data_dir.join("repos").join(repo.to_string());
     let bare_repo = git::ensure_bare_repo(&repo_dir).await?;
 
-    let mut deployments: HashMap<Sha, Deployment> = HashMap::new();
+    let mut staging_deployments: HashMap<Sha, StagingDeployment> = HashMap::new();
+    let mut production_deployment: Option<ProductionDeployment> = None;
 
     info!(
         repo = %repo,
@@ -60,13 +70,13 @@ async fn main() -> anyhow::Result<()> {
 
         let new_targets: Vec<_> = targets
             .iter()
-            .filter(|t| !deployments.contains_key(&t.sha))
+            .filter(|t| !staging_deployments.contains_key(&t.sha))
             .collect();
 
         if !new_targets.is_empty() {
             info!(count = new_targets.len(), "deploying new targets");
 
-            let mut set: JoinSet<anyhow::Result<(Deployment, u64)>> = JoinSet::new();
+            let mut set: JoinSet<anyhow::Result<(StagingDeployment, u64)>> = JoinSet::new();
             for target in new_targets {
                 let port = port_allocator.allocate()?;
                 let bare_repo = bare_repo.clone();
@@ -86,9 +96,9 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .await?;
 
-                    let run_dir = data_dir.join("deploys").join(sha.as_str());
+                    let run_dir = data_dir.join("staging").join(sha.as_str());
                     let deployment =
-                        deploy_sha(&sha, &checkout_dir, &run_dir, port, &tailscale_hostname)
+                        deploy_staging(&sha, &checkout_dir, &run_dir, port, &tailscale_hostname)
                             .await?;
                     Ok((deployment, pr_number))
                 });
@@ -97,13 +107,10 @@ async fn main() -> anyhow::Result<()> {
             while let Some(result) = set.join_next().await {
                 match result {
                     Ok(Ok((deployment, pr_number))) => {
-                        info!(sha = %deployment.sha, port = deployment.port, "deployment succeeded");
+                        info!(sha = %deployment.sha, port = deployment.port, "staging deployment succeeded");
 
-                        // Direct MagicDNS URL with the allocated port
-                        let preview_url = format!(
-                            "http://{}:{}/",
-                            tailscale_hostname, deployment.port
-                        );
+                        let preview_url =
+                            format!("http://{}:{}/", tailscale_hostname, deployment.port);
                         if let Err(e) = installation
                             .upsert_deploy_comment(pr_number, &preview_url)
                             .await
@@ -111,10 +118,10 @@ async fn main() -> anyhow::Result<()> {
                             warn!(error = ?e, pr = pr_number, "failed to post deploy comment");
                         }
 
-                        deployments.insert(deployment.sha.clone(), deployment);
+                        staging_deployments.insert(deployment.sha.clone(), deployment);
                     }
                     Ok(Err(e)) => {
-                        warn!(error = ?e, "deployment failed");
+                        warn!(error = ?e, "staging deployment failed");
                     }
                     Err(e) => {
                         warn!(error = ?e, "task panicked");
@@ -124,20 +131,105 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let target_shas: std::collections::HashSet<_> = targets.iter().map(|t| &t.sha).collect();
-        for sha in deployments
+        for sha in staging_deployments
             .keys()
             .filter(|sha| !target_shas.contains(sha))
             .cloned()
             .collect::<Vec<_>>()
         {
-            if let Some(mut deployment) = deployments.remove(&sha) {
-                kill_deployment(&mut deployment).await;
+            if let Some(mut deployment) = staging_deployments.remove(&sha) {
+                kill_staging(&mut deployment).await;
                 port_allocator.release(deployment.port);
             }
         }
 
+        // Production deployment
+        if production_enabled {
+            let production_port =
+                production_port.expect("HAZEL_PRODUCTION_PORT required when production enabled");
+            let production_run_dir = production_run_dir
+                .as_ref()
+                .expect("HAZEL_PRODUCTION_RUN_DIR required when production enabled");
+
+            match installation.fetch_branch_sha(&production_branch).await {
+                Ok(branch_sha) => {
+                    let needs_deploy = production_deployment
+                        .as_ref()
+                        .map(|d| d.sha != branch_sha)
+                        .unwrap_or(true);
+
+                    if needs_deploy {
+                        info!(
+                            branch = %production_branch,
+                            sha = %branch_sha,
+                            "production branch updated, deploying"
+                        );
+
+                        // Get fetch URL with token
+                        let token = installation.ensure_token(&app_client).await?;
+                        let fetch_url = format!(
+                            "https://x-access-token:{}@github.com/{}.git",
+                            secrecy::ExposeSecret::expose_secret(&token),
+                            installation.repo
+                        );
+
+                        // Extract commit to checkout dir
+                        let checkout_dir = data_dir.join("checkouts").join(branch_sha.as_str());
+                        if let Err(e) = git::extract_commit(
+                            &bare_repo,
+                            &fetch_url,
+                            branch_sha.as_str(),
+                            &checkout_dir,
+                        )
+                        .await
+                        {
+                            warn!(error = ?e, sha = %branch_sha, "failed to extract production commit");
+                        } else {
+                            match build_production(&checkout_dir).await {
+                                Ok(_) => {
+                                    // Kill old deployment now that new is built
+                                    if let Some(mut old) = production_deployment.take() {
+                                        kill_production(&mut old).await;
+                                    }
+
+                                    match run_production(
+                                        &branch_sha,
+                                        &checkout_dir,
+                                        production_run_dir,
+                                        production_port,
+                                        &tailscale_hostname,
+                                    )
+                                    .await
+                                    {
+                                        Ok(deployment) => {
+                                            info!(
+                                                sha = %deployment.sha,
+                                                port = production_port,
+                                                "production deployment succeeded"
+                                            );
+                                            production_deployment = Some(deployment);
+                                        }
+                                        Err(e) => {
+                                            warn!(error = ?e, sha = %branch_sha, "production deployment failed");
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(error = ?e, sha = %branch_sha, "production build failed");
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = ?e, branch = %production_branch, "failed to fetch branch sha");
+                }
+            }
+        }
+
         debug!(
-            active = deployments.len(),
+            staging = staging_deployments.len(),
+            production = production_deployment.is_some(),
             targets = targets.len(),
             "poll complete"
         );
@@ -149,16 +241,23 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!("shutting down");
-    for (_, mut deployment) in deployments {
-        kill_deployment(&mut deployment).await;
+
+    // Kill staging deployments
+    for (_, mut deployment) in staging_deployments {
+        kill_staging(&mut deployment).await;
     }
 
-    // Clean up checkouts and deploys (keep repos for git cache)
+    // Kill production deployment
+    if let Some(mut deployment) = production_deployment {
+        kill_production(&mut deployment).await;
+    }
+
+    // Clean up checkouts and staging dirs (keep repos for git cache)
     if let Err(e) = tokio::fs::remove_dir_all(data_dir.join("checkouts")).await {
         warn!(error = ?e, "failed to clean checkouts");
     }
-    if let Err(e) = tokio::fs::remove_dir_all(data_dir.join("deploys")).await {
-        warn!(error = ?e, "failed to clean deploys");
+    if let Err(e) = tokio::fs::remove_dir_all(data_dir.join("staging")).await {
+        warn!(error = ?e, "failed to clean staging");
     }
 
     info!("cleanup complete");
@@ -168,14 +267,14 @@ async fn main() -> anyhow::Result<()> {
 async fn initialize_data_dir() -> anyhow::Result<PathBuf> {
     let data_dir = PathBuf::from(env::var("HAZEL_DATA_DIR").context("HAZEL_DATA_DIR not set")?);
 
-    // Clean up stale checkouts/deploys from previous runs (ignore errors if they don't exist)
+    // Clean up stale checkouts/staging from previous runs (ignore errors if they don't exist)
     let _ = tokio::fs::remove_dir_all(data_dir.join("checkouts")).await;
-    let _ = tokio::fs::remove_dir_all(data_dir.join("deploys")).await;
+    let _ = tokio::fs::remove_dir_all(data_dir.join("staging")).await;
 
     tokio::try_join!(
         tokio::fs::create_dir_all(data_dir.join("repos")),
         tokio::fs::create_dir_all(data_dir.join("checkouts")),
-        tokio::fs::create_dir_all(data_dir.join("deploys")),
+        tokio::fs::create_dir_all(data_dir.join("staging")),
     )
     .context("failed to create directories")?;
 

@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, bail};
 use chrono::{DateTime, Utc};
 use octocrab::{Octocrab, models::InstallationToken};
 use secrecy::{ExposeSecret, SecretString};
@@ -91,6 +91,24 @@ impl Installation {
                 pr_number: pull.number,
             })
             .collect())
+    }
+
+    /// Get the HEAD SHA of a branch.
+    pub async fn fetch_branch_sha(&self, branch: &str) -> anyhow::Result<Sha> {
+        let branch_info = self
+            .client
+            .repos(&self.repo.owner, &self.repo.name)
+            .get_ref(&octocrab::params::repos::Reference::Branch(branch.to_string()))
+            .await
+            .with_context(|| format!("failed to fetch branch {}", branch))?;
+
+        let sha = match branch_info.object {
+            octocrab::models::repos::Object::Commit { sha, .. } => sha,
+            octocrab::models::repos::Object::Tag { sha, .. } => sha,
+            _ => bail!("unexpected ref object type for branch {}", branch),
+        };
+
+        Ok(Sha::new(sha))
     }
 
     /// Create or update the deploy preview comment on a PR.

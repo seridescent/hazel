@@ -1,81 +1,81 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use std::path::Path;
 use tokio::process::{Child, Command};
-use tracing::{info, warn};
+use tracing::warn;
 
-use crate::Sha;
+/// Builds a nix derivation and returns its store path.
+pub async fn build_derivation(checkout_dir: &Path, attr: &str) -> anyhow::Result<()> {
+    let flake_ref = format!("{}#{}", checkout_dir.display(), attr);
 
-pub struct Deployment {
-    pub sha: Sha,
-    pub port: u16,
-    pub process: Child,
-}
+    let output = Command::new("nix")
+        .args(["build", "--no-link", "--print-out-paths", &flake_ref])
+        .output()
+        .await
+        .context("failed to run nix build")?;
 
-/// Kills a deployment's process.
-pub async fn kill_deployment(deployment: &mut Deployment) {
-    info!(sha = %deployment.sha, port = deployment.port, "killing deployment");
-
-    // if the executable produces a child process, this will not clean them all up
-    // correctly. that's expected for now. executable derivations should end in `exec`
-    // if they are scripts
-    if let Err(e) = deployment.process.kill().await {
-        warn!(sha = %deployment.sha, error = ?e, "failed to kill deployment process");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("nix build failed for {}: {}", flake_ref, stderr);
     }
 
-    if let Err(e) = deployment.process.wait().await {
-        warn!(sha = %deployment.sha, error = ?e, "failed to wait for deployment process");
-    }
+    Ok(())
 }
 
-/// Deploys a single SHA. Returns a Deployment on success.
-pub async fn deploy_sha(
-    sha: &Sha,
+/// Runs a deployment: executes preStart, then spawns the executable.
+pub async fn run_deployment(
     checkout_dir: &Path,
     run_dir: &Path,
-    port: u16,
     tailscale_hostname: &str,
-) -> anyhow::Result<Deployment> {
+    port: u16,
+    pre_start_attr: &str,
+    executable_attr: &str,
+) -> anyhow::Result<Child> {
     tokio::fs::create_dir_all(run_dir).await?;
 
-    info!(sha = %sha, port = port, "starting deployment");
-
-    // Direct MagicDNS URL - no reverse proxy needed
     let origin = format!("http://{}:{}", tailscale_hostname, port);
+    let env_vars = [
+        ("HAZEL_PORT", port.to_string()),
+        ("HAZEL_RUN_DIR", run_dir.display().to_string()),
+        ("HAZEL_ORIGIN", origin),
+    ];
 
-    let pre_start_status = Command::new("nix")
-        .args(["run", &format!("{}#hazel-preStart", checkout_dir.display())])
-        .env("HAZEL_RUN_DIR", run_dir)
-        .env("HAZEL_ORIGIN", &origin)
+    // Run preStart and wait for completion
+    let status = Command::new("nix")
+        .args([
+            "run",
+            &format!("{}#{}", checkout_dir.display(), pre_start_attr),
+        ])
         .current_dir(run_dir)
+        .envs(env_vars.clone())
         .status()
         .await
         .context("failed to run preStart")?;
 
-    if !pre_start_status.success() {
-        bail!("preStart failed for {sha}");
+    if !status.success() {
+        bail!("preStart failed");
     }
 
-    // TODO: handle spawned process exiting with error in unhappy case?
-    //  happy path: process lives until killed by us, but
-    //  should probably do something about it exiting unexpectedly
-
-    let process = Command::new("nix")
+    // Spawn executable
+    let child = Command::new("nix")
         .args([
             "run",
-            &format!("{}#hazel-executable", checkout_dir.display()),
+            &format!("{}#{}", checkout_dir.display(), executable_attr),
         ])
-        .env("HAZEL_PORT", port.to_string())
-        .env("HAZEL_RUN_DIR", run_dir)
-        .env("HAZEL_ORIGIN", &origin)
         .current_dir(run_dir)
+        .envs(env_vars)
         .spawn()
         .context("failed to spawn executable")?;
 
-    info!(sha = %sha, port = port, pid = ?process.id(), "deployment started");
+    Ok(child)
+}
 
-    Ok(Deployment {
-        sha: sha.clone(),
-        port,
-        process,
-    })
+/// Kills a process gracefully.
+pub async fn kill_process(process: &mut Child) {
+    if let Err(e) = process.kill().await {
+        warn!(error = ?e, "failed to kill process");
+    }
+
+    if let Err(e) = process.wait().await {
+        warn!(error = ?e, "failed to wait for process");
+    }
 }
