@@ -10,7 +10,7 @@ use octocrab::{Octocrab, models::AppId};
 use serde::Deserialize;
 use std::{collections::HashMap, env, path::PathBuf, time::Duration};
 use tokio::task::JoinSet;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -227,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        info!(
+        debug!(
             staging = staging_deployments.len(),
             production = production_deployment.is_some(),
             targets = targets.len(),
