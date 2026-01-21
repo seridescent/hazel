@@ -17,50 +17,52 @@
       productionCfg = config.hazel.production;
     in
     {
-      options.hazel.staging = {
-        enable = lib.mkEnableOption "hazel staging configuration for PR previews";
+      options.hazel = {
+        staging = {
+          enable = lib.mkEnableOption "hazel staging configuration for PR previews";
 
-        preStart = lib.mkOption {
-          type = lib.types.lines;
-          default = "";
-          description = ''
-            Script to run before the service is started.
-            Has access to HAZEL_RUN_DIR and HAZEL_ORIGIN for populating
-            the working directory with external data (e.g., fixture data, env files).
-          '';
+          preStart = lib.mkOption {
+            type = lib.types.lines;
+            default = "";
+            description = ''
+              Script to run before the service is started.
+              Has access to HAZEL_RUN_DIR and HAZEL_ORIGIN for populating
+              the working directory with external data (e.g., fixture data, env files).
+            '';
+          };
+
+          executable = lib.mkOption {
+            type = lib.types.package;
+            description = ''
+              A derivation that serves as the start script for the service.
+              Should be runnable via `nix run` and respect HAZEL_PORT for binding.
+              Also has access to HAZEL_RUN_DIR and HAZEL_ORIGIN.
+              Typically created with pkgs.writeShellApplication.
+            '';
+          };
         };
 
-        executable = lib.mkOption {
-          type = lib.types.package;
-          description = ''
-            A derivation that serves as the start script for the service.
-            Should be runnable via `nix run` and respect HAZEL_PORT for binding.
-            Also has access to HAZEL_RUN_DIR and HAZEL_ORIGIN.
-            Typically created with pkgs.writeShellApplication.
-          '';
-        };
-      };
+        production = {
+          enable = lib.mkEnableOption "hazel production deployment configuration";
 
-      options.hazel.production = {
-        enable = lib.mkEnableOption "hazel production deployment configuration";
+          preStart = lib.mkOption {
+            type = lib.types.lines;
+            default = "";
+            description = ''
+              Script to run before the production service is started.
+              Has access to HAZEL_RUN_DIR (persistent) and HAZEL_ORIGIN.
+            '';
+          };
 
-        preStart = lib.mkOption {
-          type = lib.types.lines;
-          default = "";
-          description = ''
-            Script to run before the production service is started.
-            Has access to HAZEL_RUN_DIR (persistent) and HAZEL_ORIGIN.
-          '';
-        };
-
-        executable = lib.mkOption {
-          type = lib.types.package;
-          description = ''
-            A derivation that serves as the start script for the production service.
-            Should be runnable via `nix run` and respect HAZEL_PORT for binding.
-            Also has access to HAZEL_RUN_DIR (persistent) and HAZEL_ORIGIN.
-            Typically created with pkgs.writeShellApplication.
-          '';
+          executable = lib.mkOption {
+            type = lib.types.package;
+            description = ''
+              A derivation that serves as the start script for the production service.
+              Should be runnable via `nix run` and respect HAZEL_PORT for binding.
+              Also has access to HAZEL_RUN_DIR (persistent) and HAZEL_ORIGIN.
+              Typically created with pkgs.writeShellApplication.
+            '';
+          };
         };
       };
 
