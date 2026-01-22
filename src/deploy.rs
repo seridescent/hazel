@@ -25,18 +25,17 @@ pub async fn build_derivation(checkout_dir: &Path, attr: &str) -> anyhow::Result
 pub async fn run_deployment(
     checkout_dir: &Path,
     run_dir: &Path,
-    tailscale_hostname: &str,
     port: u16,
+    origin: &str,
     pre_start_attr: &str,
     executable_attr: &str,
 ) -> anyhow::Result<Child> {
     tokio::fs::create_dir_all(run_dir).await?;
 
-    let origin = format!("http://{}:{}", tailscale_hostname, port);
     let env_vars = [
         ("HAZEL_PORT", port.to_string()),
         ("HAZEL_RUN_DIR", run_dir.display().to_string()),
-        ("HAZEL_ORIGIN", origin),
+        ("HAZEL_ORIGIN", origin.to_string()),
     ];
 
     // Run preStart and wait for completion

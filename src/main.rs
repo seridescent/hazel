@@ -39,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
     let production_port: Option<u16> = env::var("HAZEL_PRODUCTION_PORT")
         .ok()
         .and_then(|p| p.parse().ok());
+    let production_origin = env::var("HAZEL_PRODUCTION_ORIGIN").ok();
     let production_run_dir: Option<PathBuf> =
         env::var("HAZEL_PRODUCTION_RUN_DIR").ok().map(PathBuf::from);
 
@@ -147,6 +148,9 @@ async fn main() -> anyhow::Result<()> {
         if production_enabled {
             let production_port =
                 production_port.expect("HAZEL_PRODUCTION_PORT required when production enabled");
+            let production_origin = production_origin
+                .as_ref()
+                .expect("HAZEL_PRODUCTION_ORIGIN required when production enabled");
             let production_run_dir = production_run_dir
                 .as_ref()
                 .expect("HAZEL_PRODUCTION_RUN_DIR required when production enabled");
@@ -197,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
                                         &checkout_dir,
                                         production_run_dir,
                                         production_port,
-                                        &tailscale_hostname,
+                                        production_origin,
                                     )
                                     .await
                                     {

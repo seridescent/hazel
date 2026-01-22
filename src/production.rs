@@ -25,13 +25,13 @@ pub async fn run_production(
     checkout_dir: &Path,
     run_dir: &Path,
     port: u16,
-    tailscale_hostname: &str,
+    origin: &str,
 ) -> anyhow::Result<ProductionDeployment> {
     let process = run_deployment(
         checkout_dir,
         run_dir,
-        tailscale_hostname,
         port,
+        origin,
         "hazel-production-preStart",
         "hazel-production-executable",
     )

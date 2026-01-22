@@ -92,8 +92,14 @@
             };
 
             port = lib.mkOption {
-              description = "Fixed port for production deployment";
+              description = "Fixed port on the host for production deployment";
               type = lib.types.port;
+            };
+
+            origin = lib.mkOption {
+              description = "Expected HTTP Origin for incoming requests to production deployment";
+              type = lib.types.str;
+              example = "http://hazel:8080";
             };
           };
         };
@@ -141,6 +147,7 @@
             HAZEL_PRODUCTION_RUN_DIR = cfg.production.runDir;
             HAZEL_PRODUCTION_BRANCH = cfg.production.branch;
             HAZEL_PRODUCTION_PORT = toString cfg.production.port;
+            HAZEL_PRODUCTION_ORIGIN = cfg.production.origin;
           };
 
           serviceConfig = {

@@ -24,11 +24,12 @@ pub async fn deploy_staging(
     build_derivation(checkout_dir, "hazel-preStart").await?;
     build_derivation(checkout_dir, "hazel-executable").await?;
 
+    let origin = format!("http://{}:{}", tailscale_hostname, port);
     let process = run_deployment(
         checkout_dir,
         run_dir,
-        tailscale_hostname,
         port,
+        &origin,
         "hazel-preStart",
         "hazel-executable",
     )
