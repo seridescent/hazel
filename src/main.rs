@@ -1,10 +1,11 @@
 use anyhow::{Context, bail};
 use hazel::{
     Repo, Sha, git,
-    installation::Installation,
+    deploy::BuildLogs,
+    installation::{DeployComment, Installation},
     port_allocator::PortAllocator,
     production::{ProductionDeployment, build_production, kill_production, run_production},
-    staging::{StagingDeployment, deploy_staging, kill_staging},
+    staging::{StagingDeployment, StagingResult, deploy_staging, kill_staging},
 };
 use octocrab::{Octocrab, models::AppId};
 use serde::Deserialize;
@@ -77,7 +78,8 @@ async fn main() -> anyhow::Result<()> {
         if !new_targets.is_empty() {
             info!(count = new_targets.len(), "deploying new targets");
 
-            let mut set: JoinSet<anyhow::Result<(StagingDeployment, u64)>> = JoinSet::new();
+            // Result type: (StagingResult, pr_number, sha, port)
+            let mut set: JoinSet<(StagingResult, u64, Sha, u16)> = JoinSet::new();
             for target in new_targets {
                 let port = port_allocator.allocate()?;
                 let bare_repo = bare_repo.clone();
@@ -89,31 +91,48 @@ async fn main() -> anyhow::Result<()> {
                 let tailscale_hostname = tailscale_hostname.clone();
                 set.spawn(async move {
                     let checkout_dir = data_dir.join("checkouts").join(sha.as_str());
-                    git::extract_commit(
+
+                    // If git extraction fails, return error with empty logs
+                    if let Err(e) = git::extract_commit(
                         &bare_repo,
                         fetch_url.as_str(),
                         sha.as_str(),
                         &checkout_dir,
                     )
-                    .await?;
+                    .await
+                    {
+                        let logs = BuildLogs {
+                            pre_start_build: Some(Err(hazel::deploy::BuildOutput {
+                                stdout: String::new(),
+                                stderr: format!("git extract failed: {}", e),
+                            })),
+                            ..Default::default()
+                        };
+                        return (Err(logs), pr_number, sha, port);
+                    }
 
                     let run_dir = data_dir.join("staging").join(sha.as_str());
-                    let deployment =
+                    let result =
                         deploy_staging(&sha, &checkout_dir, &run_dir, port, &tailscale_hostname)
-                            .await?;
-                    Ok((deployment, pr_number))
+                            .await;
+                    (result, pr_number, sha, port)
                 });
             }
 
             while let Some(result) = set.join_next().await {
                 match result {
-                    Ok(Ok((deployment, pr_number))) => {
+                    Ok((Ok((deployment, logs)), pr_number, _sha, _port)) => {
                         info!(sha = %deployment.sha, port = deployment.port, "staging deployment succeeded");
 
                         let preview_url =
                             format!("http://{}:{}/", tailscale_hostname, deployment.port);
+                        let comment = DeployComment::success(
+                            preview_url,
+                            logs,
+                            deployment.sha.as_str().to_string(),
+                        );
                         if let Err(e) = installation
-                            .upsert_deploy_comment(pr_number, &preview_url)
+                            .upsert_deploy_comment(pr_number, &comment)
                             .await
                         {
                             warn!(error = ?e, pr = pr_number, "failed to post deploy comment");
@@ -121,8 +140,20 @@ async fn main() -> anyhow::Result<()> {
 
                         staging_deployments.insert(deployment.sha.clone(), deployment);
                     }
-                    Ok(Err(e)) => {
-                        warn!(error = ?e, "staging deployment failed");
+                    Ok((Err(logs), pr_number, sha, port)) => {
+                        warn!(sha = %sha, "staging deployment failed");
+
+                        // Post failure comment
+                        let comment = DeployComment::failure(logs, sha.as_str().to_string());
+                        if let Err(e) = installation
+                            .upsert_deploy_comment(pr_number, &comment)
+                            .await
+                        {
+                            warn!(error = ?e, pr = pr_number, "failed to post failure comment");
+                        }
+
+                        // Release the port since deployment failed
+                        port_allocator.release(port);
                     }
                     Err(e) => {
                         warn!(error = ?e, "task panicked");
