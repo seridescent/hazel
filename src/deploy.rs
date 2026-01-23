@@ -2,14 +2,12 @@ use std::path::Path;
 use tokio::process::{Child, Command};
 use tracing::warn;
 
-/// Captured output from a build or run command.
 #[derive(Debug, Clone)]
 pub struct BuildOutput {
     pub stdout: String,
     pub stderr: String,
 }
 
-/// Result of a build stage: Ok for success, Err for failure.
 pub type BuildResult = Result<BuildOutput, BuildOutput>;
 
 /// Collected logs from all deployment stages.
@@ -21,13 +19,18 @@ pub struct BuildLogs {
 }
 
 /// Builds a nix derivation and returns the captured output.
-/// Uses -L flag for full verbose output.
 /// Returns Ok(BuildOutput) on success, Err(BuildOutput) on failure.
 pub async fn build_derivation(checkout_dir: &Path, attr: &str) -> Result<BuildOutput, BuildOutput> {
     let flake_ref = format!("{}#{}", checkout_dir.display(), attr);
 
     let output = match Command::new("nix")
-        .args(["build", "--no-link", "--print-out-paths", "-L", &flake_ref])
+        .args([
+            "build",
+            "--no-link",
+            "--print-out-paths",
+            "--print-build-logs",
+            &flake_ref,
+        ])
         .output()
         .await
     {
@@ -79,7 +82,6 @@ pub async fn run_deployment(
         ("HAZEL_ORIGIN", origin.to_string()),
     ];
 
-    // Run preStart and capture output
     let pre_start_output = Command::new("nix")
         .args([
             "run",
@@ -115,7 +117,6 @@ pub async fn run_deployment(
         }
     }
 
-    // Spawn executable
     let child = Command::new("nix")
         .args([
             "run",
@@ -140,7 +141,6 @@ pub async fn run_deployment(
     }
 }
 
-/// Kills a process gracefully.
 pub async fn kill_process(process: &mut Child) {
     if let Err(e) = process.kill().await {
         warn!(error = ?e, "failed to kill process");

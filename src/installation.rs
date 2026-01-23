@@ -16,7 +16,6 @@ const COMMENT_TIMEZONE: &str = "America/New_York";
 const MAX_STDOUT_CHARS: usize = 5000;
 const MAX_STDERR_CHARS: usize = 10000;
 
-/// Data for a deployment comment.
 pub struct DeployComment {
     pub url: Option<String>,
     pub logs: BuildLogs,
@@ -61,7 +60,10 @@ fn format_log_section(name: &str, result: &BuildResult) -> String {
         Err(o) => (false, o),
     };
     let status_emoji = if success { "✅" } else { "❌" };
-    let mut section = format!("<details>\n<summary>{} {}</summary>\n\n", status_emoji, name);
+    let mut section = format!(
+        "<details>\n<summary>{} {}</summary>\n\n",
+        status_emoji, name
+    );
 
     if !output.stdout.is_empty() {
         section.push_str("**stdout:**\n```\n");
@@ -84,7 +86,9 @@ fn format_log_section(name: &str, result: &BuildResult) -> String {
 }
 
 fn format_deploy_comment(comment: &DeployComment) -> String {
-    let tz: Tz = COMMENT_TIMEZONE.parse().unwrap_or(chrono_tz::America::New_York);
+    let tz: Tz = COMMENT_TIMEZONE
+        .parse()
+        .unwrap_or(chrono_tz::America::New_York);
     let local_time = comment.timestamp.with_timezone(&tz);
     let time_str = local_time.format("%Y-%m-%d %H:%M:%S %Z").to_string();
     let short_sha = &comment.sha[..7.min(comment.sha.len())];
@@ -210,7 +214,9 @@ impl Installation {
         let branch_info = self
             .client
             .repos(&self.repo.owner, &self.repo.name)
-            .get_ref(&octocrab::params::repos::Reference::Branch(branch.to_string()))
+            .get_ref(&octocrab::params::repos::Reference::Branch(
+                branch.to_string(),
+            ))
             .await
             .with_context(|| format!("failed to fetch branch {}", branch))?;
 

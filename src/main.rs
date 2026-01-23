@@ -1,7 +1,8 @@
 use anyhow::{Context, bail};
 use hazel::{
-    Repo, Sha, git,
+    Repo, Sha,
     deploy::BuildLogs,
+    git,
     installation::{DeployComment, Installation},
     port_allocator::PortAllocator,
     production::{ProductionDeployment, build_production, kill_production, run_production},
@@ -143,7 +144,6 @@ async fn main() -> anyhow::Result<()> {
                     Ok((Err(logs), pr_number, sha, port)) => {
                         warn!(sha = %sha, "staging deployment failed");
 
-                        // Post failure comment
                         let comment = DeployComment::failure(logs, sha.as_str().to_string());
                         if let Err(e) = installation
                             .upsert_deploy_comment(pr_number, &comment)
@@ -175,7 +175,6 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Production deployment
         if production_enabled {
             let production_port =
                 production_port.expect("HAZEL_PRODUCTION_PORT required when production enabled");
@@ -277,12 +276,10 @@ async fn main() -> anyhow::Result<()> {
 
     info!("shutting down");
 
-    // Kill staging deployments
     for (_, mut deployment) in staging_deployments {
         kill_staging(&mut deployment).await;
     }
 
-    // Kill production deployment
     if let Some(mut deployment) = production_deployment {
         kill_production(&mut deployment).await;
     }
