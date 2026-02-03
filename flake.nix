@@ -32,6 +32,8 @@
             inputsFrom = [
               self'.devShells.rust
             ];
+
+            packages = [ pkgs.uv ];
           };
       };
       flake = {
