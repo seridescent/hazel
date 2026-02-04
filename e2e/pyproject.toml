@@ -1,0 +1,8 @@
+[project]
+name = "hazel-e2e"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
