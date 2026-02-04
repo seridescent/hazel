@@ -1,17 +1,7 @@
 use std::path::Path;
 use tokio::process::Child;
 
-use crate::Sha;
-use crate::deploy::{BuildLogs, build_derivation, kill_process, run_deployment};
-
-pub struct ProductionDeployment {
-    pub sha: Sha,
-    pub process: Child,
-}
-
-pub async fn kill_production(deployment: &mut ProductionDeployment) {
-    kill_process(&mut deployment.process).await;
-}
+use crate::deploy::{BuildLogs, build_derivation, run_deployment};
 
 /// Builds production derivations. Call before killing old deployment to minimize downtime.
 pub async fn build_production(checkout_dir: &Path) -> anyhow::Result<()> {
@@ -28,13 +18,11 @@ pub async fn build_production(checkout_dir: &Path) -> anyhow::Result<()> {
 
 /// Runs production deployment. Assumes derivations are already built.
 pub async fn run_production(
-    sha: &Sha,
     checkout_dir: &Path,
     run_dir: &Path,
     port: u16,
     origin: &str,
-) -> anyhow::Result<ProductionDeployment> {
-    // Production doesn't need to track logs for PR comments
+) -> anyhow::Result<Child> {
     let logs = BuildLogs::default();
 
     let (process, _logs) = run_deployment(
@@ -57,8 +45,5 @@ pub async fn run_production(
         anyhow::anyhow!("production deployment failed: {}", msg)
     })?;
 
-    Ok(ProductionDeployment {
-        sha: sha.clone(),
-        process,
-    })
+    Ok(process)
 }

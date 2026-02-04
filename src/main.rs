@@ -1,34 +1,35 @@
 use anyhow::{Context, bail};
 use hazel::{
     Repo, Sha,
-    deploy::BuildLogs,
+    deploy::{BuildLogs, kill_process},
     git,
-    installation::{DeployComment, Installation},
+    installation::{DeployComment, DeployTarget, Installation},
     port_allocator::PortAllocator,
-    production::{ProductionDeployment, build_production, kill_production, run_production},
-    staging::{StagingDeployment, StagingResult, deploy_staging, kill_staging},
+    production::{build_production, run_production},
+    staging::{StagingResult, deploy_staging},
 };
 use octocrab::{Octocrab, models::AppId};
 use serde::Deserialize;
-use std::{
-    collections::HashMap,
-    env,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{collections::HashMap, env, path::Path};
+use tokio::process::Child;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
-enum StagingTaskResult {
-    Deployed(StagingDeployment, BuildLogs),
-    Failed(BuildLogs, Sha, u16),
+struct StagingDeployment {
+    port: u16,
+    process: Child,
+}
+
+struct ProductionDeployment {
+    sha: Sha,
+    process: Child,
 }
 
 struct ProductionConfig {
     branch: String,
     port: u16,
     origin: String,
-    run_dir: PathBuf,
+    run_dir: &'static Path,
 }
 
 #[tokio::main]
@@ -40,22 +41,20 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let data_dir = initialize_data_dir().await?;
+    let data_dir: &'static Path = Box::leak(initialize_data_dir().await?);
     let app_client = initialize_app_client().await?;
     let mut port_allocator = initialize_port_allocator()?;
     let poll_interval = initialize_poll_interval()?;
-    let tailscale_hostname = get_tailscale_hostname().await?;
+    let tailscale_hostname: &'static str =
+        Box::leak(get_tailscale_hostname().await?.into_boxed_str());
 
-    // intentionally just watching one repository because YAGNI,
-    // but it wouldn't be hard to generalize this to just query for
-    // repositories where the app is installed.
     let repo = initialize_watched_repo()?;
     let installation = initialize_installation(&app_client, repo.clone()).await?;
 
     let production_config = initialize_production_config()?;
 
     let repo_dir = data_dir.join("repos").join(repo.to_string());
-    let bare_repo = git::ensure_bare_repo(&repo_dir).await?;
+    let bare_repo: &'static Path = Box::leak(git::ensure_bare_repo(&repo_dir).await?.into_boxed_path());
 
     let mut staging_deployments: HashMap<Sha, StagingDeployment> = HashMap::new();
     let mut production_deployment: Option<ProductionDeployment> = None;
@@ -66,8 +65,6 @@ async fn main() -> anyhow::Result<()> {
         "hazel started"
     );
 
-    // choosing to do the silly thing and poll because i don't feel like
-    // setting up a webhook receiver.
     loop {
         let targets = match installation.fetch_deploy_targets(&app_client).await {
             Ok(t) => t,
@@ -88,37 +85,30 @@ async fn main() -> anyhow::Result<()> {
 
         if !new_targets.is_empty() {
             info!(count = new_targets.len(), "deploying new targets");
-            match deploy_and_collect_staging(
+            if let Err(e) = deploy_staging_targets(
                 &new_targets,
                 &mut port_allocator,
-                &bare_repo,
-                &data_dir,
-                &tailscale_hostname,
+                bare_repo,
+                data_dir,
+                tailscale_hostname,
+                &installation,
+                &mut staging_deployments,
             )
             .await
             {
-                Ok(results) => {
-                    handle_staging_results(
-                        results,
-                        &installation,
-                        &mut port_allocator,
-                        &mut staging_deployments,
-                        &tailscale_hostname,
-                    )
-                    .await;
-                }
-                Err(e) => warn!(error = ?e, "staging deployment spawn failed"),
+                warn!(error = ?e, "staging deployment spawn failed");
             }
         }
 
         cleanup_dead_staging(&targets, &mut staging_deployments, &mut port_allocator).await;
 
+        // --- Production ---
         if let Some(ref config) = production_config
             && let Err(e) = poll_production(
                 &installation,
                 &app_client,
-                &bare_repo,
-                &data_dir,
+                bare_repo,
+                data_dir,
                 &mut production_deployment,
                 config,
             )
@@ -143,11 +133,11 @@ async fn main() -> anyhow::Result<()> {
     info!("shutting down");
 
     for (_, mut deployment) in staging_deployments {
-        kill_staging(&mut deployment).await;
+        kill_process(&mut deployment.process).await;
     }
 
     if let Some(mut deployment) = production_deployment {
-        kill_production(&mut deployment).await;
+        kill_process(&mut deployment.process).await;
     }
 
     // Clean up checkouts and staging dirs (keep repos for git cache)
@@ -162,8 +152,172 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn initialize_data_dir() -> anyhow::Result<PathBuf> {
-    let data_dir = PathBuf::from(env::var("HAZEL_DATA_DIR").context("HAZEL_DATA_DIR not set")?);
+async fn deploy_staging_targets(
+    targets: &[&DeployTarget],
+    port_allocator: &mut PortAllocator,
+    bare_repo: &'static Path,
+    data_dir: &'static Path,
+    tailscale_hostname: &'static str,
+    installation: &Installation,
+    staging_deployments: &mut HashMap<Sha, StagingDeployment>,
+) -> anyhow::Result<()> {
+    let mut set: JoinSet<(StagingResult, u64, Sha, u16)> = JoinSet::new();
+
+    for target in targets {
+        let port = port_allocator.allocate()?;
+        let sha = target.sha.clone();
+        let fetch_url = target.fetch_url.clone();
+        let pr_number = target.pr_number;
+
+        set.spawn(async move {
+            let checkout_dir = data_dir.join("checkouts").join(sha.as_str());
+
+            if let Err(e) =
+                git::extract_commit(bare_repo, fetch_url.as_str(), sha.as_str(), &checkout_dir)
+                    .await
+            {
+                let logs = BuildLogs {
+                    pre_start_build: Some(Err(hazel::deploy::BuildOutput {
+                        stdout: String::new(),
+                        stderr: format!("git extract failed: {}", e),
+                    })),
+                    ..Default::default()
+                };
+                return (Err(logs), pr_number, sha, port);
+            }
+
+            let run_dir = data_dir.join("staging").join(sha.as_str());
+            let result = deploy_staging(&checkout_dir, &run_dir, port, tailscale_hostname).await;
+            (result, pr_number, sha, port)
+        });
+    }
+
+    while let Some(result) = set.join_next().await {
+        let (staging_result, pr_number, sha, port) = match result {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = ?e, "staging task panicked");
+                continue;
+            }
+        };
+
+        let (comment, deployed) = match staging_result {
+            Ok((process, logs)) => {
+                info!(sha = %sha, port, "staging deployment succeeded");
+                let preview_url = format!("http://{}:{}/", tailscale_hostname, port);
+                let comment = DeployComment::success(preview_url, logs, sha.as_str().to_string());
+                staging_deployments.insert(sha.clone(), StagingDeployment { port, process });
+                (comment, true)
+            }
+            Err(logs) => {
+                warn!(sha = %sha, "staging deployment failed");
+                let comment = DeployComment::failure(logs, sha.as_str().to_string());
+                (comment, false)
+            }
+        };
+
+        if let Err(e) = installation.upsert_deploy_comment(pr_number, &comment).await {
+            warn!(error = ?e, pr = pr_number, "failed to post deploy comment");
+        }
+
+        if !deployed {
+            port_allocator.release(port);
+        }
+    }
+
+    Ok(())
+}
+
+async fn cleanup_dead_staging(
+    targets: &[DeployTarget],
+    staging_deployments: &mut HashMap<Sha, StagingDeployment>,
+    port_allocator: &mut PortAllocator,
+) {
+    let target_shas: std::collections::HashSet<_> = targets.iter().map(|t| &t.sha).collect();
+    for sha in staging_deployments
+        .keys()
+        .filter(|sha| !target_shas.contains(sha))
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        if let Some(mut deployment) = staging_deployments.remove(&sha) {
+            kill_process(&mut deployment.process).await;
+            port_allocator.release(deployment.port);
+        }
+    }
+}
+
+async fn poll_production(
+    installation: &Installation,
+    app_client: &Octocrab,
+    bare_repo: &Path,
+    data_dir: &Path,
+    production_deployment: &mut Option<ProductionDeployment>,
+    config: &ProductionConfig,
+) -> anyhow::Result<()> {
+    let branch_sha = installation
+        .fetch_branch_sha(&config.branch)
+        .await
+        .context("failed to fetch branch sha")?;
+
+    let needs_deploy = production_deployment
+        .as_ref()
+        .map(|d| d.sha != branch_sha)
+        .unwrap_or(true);
+
+    if !needs_deploy {
+        return Ok(());
+    }
+
+    info!(
+        branch = %config.branch,
+        sha = %branch_sha,
+        "production branch updated, deploying"
+    );
+
+    let token = installation
+        .ensure_token(app_client)
+        .await
+        .context("failed to get installation token")?;
+    let fetch_url = format!(
+        "https://x-access-token:{}@github.com/{}.git",
+        secrecy::ExposeSecret::expose_secret(&token),
+        installation.repo
+    );
+
+    let checkout_dir = data_dir.join("checkouts").join(branch_sha.as_str());
+    git::extract_commit(bare_repo, &fetch_url, branch_sha.as_str(), &checkout_dir)
+        .await
+        .context("failed to extract production commit")?;
+
+    build_production(&checkout_dir)
+        .await
+        .context("production build failed")?;
+
+    if let Some(mut old) = production_deployment.take() {
+        kill_process(&mut old.process).await;
+    }
+
+    let process = run_production(&checkout_dir, config.run_dir, config.port, &config.origin)
+        .await
+        .context("production run failed")?;
+
+    info!(
+        sha = %branch_sha,
+        port = config.port,
+        "production deployment succeeded"
+    );
+    *production_deployment = Some(ProductionDeployment {
+        sha: branch_sha,
+        process,
+    });
+
+    Ok(())
+}
+
+async fn initialize_data_dir() -> anyhow::Result<Box<Path>> {
+    let data_dir =
+        std::path::PathBuf::from(env::var("HAZEL_DATA_DIR").context("HAZEL_DATA_DIR not set")?);
 
     // Clean up stale checkouts/staging from previous runs (ignore errors if they don't exist)
     let _ = tokio::fs::remove_dir_all(data_dir.join("checkouts")).await;
@@ -180,7 +334,7 @@ async fn initialize_data_dir() -> anyhow::Result<PathBuf> {
         .await
         .with_context(|| format!("failed to canonicalize {data_dir:?}"))?;
 
-    Ok(data_dir)
+    Ok(data_dir.into_boxed_path())
 }
 
 async fn initialize_app_client() -> anyhow::Result<Octocrab> {
@@ -236,13 +390,13 @@ fn initialize_port_allocator() -> anyhow::Result<PortAllocator> {
     Ok(PortAllocator::new(port_min, port_max))
 }
 
-fn initialize_poll_interval() -> anyhow::Result<Duration> {
+fn initialize_poll_interval() -> anyhow::Result<std::time::Duration> {
     let secs: u64 = env::var("HAZEL_POLL_INTERVAL_SECS")
         .context("HAZEL_POLL_INTERVAL_SECS not set")?
         .parse()
         .context("HAZEL_POLL_INTERVAL_SECS must be a number")?;
 
-    Ok(Duration::from_secs(secs))
+    Ok(std::time::Duration::from_secs(secs))
 }
 
 fn initialize_watched_repo() -> anyhow::Result<Repo> {
@@ -250,125 +404,6 @@ fn initialize_watched_repo() -> anyhow::Result<Repo> {
     let name = env::var("HAZEL_WATCHED_REPO_NAME").context("HAZEL_WATCHED_REPO_NAME not set")?;
 
     Ok(Repo::new(owner, name))
-}
-
-async fn deploy_and_collect_staging(
-    targets: &[&hazel::installation::DeployTarget],
-    port_allocator: &mut PortAllocator,
-    bare_repo: &Path,
-    data_dir: &Path,
-    tailscale_hostname: &str,
-) -> anyhow::Result<HashMap<u64, StagingTaskResult>> {
-    let mut set: JoinSet<(StagingResult, u64, Sha, u16)> = JoinSet::new();
-    for target in targets {
-        let port = port_allocator.allocate()?;
-        let bare_repo = bare_repo.to_path_buf();
-        let data_dir = data_dir.to_path_buf();
-        let sha = target.sha.clone();
-        let fetch_url = target.fetch_url.clone();
-        let pr_number = target.pr_number;
-        let tailscale_hostname = tailscale_hostname.to_owned();
-
-        set.spawn(async move {
-            let checkout_dir = data_dir.join("checkouts").join(sha.as_str());
-
-            if let Err(e) =
-                git::extract_commit(&bare_repo, fetch_url.as_str(), sha.as_str(), &checkout_dir)
-                    .await
-            {
-                let logs = BuildLogs {
-                    pre_start_build: Some(Err(hazel::deploy::BuildOutput {
-                        stdout: String::new(),
-                        stderr: format!("git extract failed: {}", e),
-                    })),
-                    ..Default::default()
-                };
-                return (Err(logs), pr_number, sha, port);
-            }
-
-            let run_dir = data_dir.join("staging").join(sha.as_str());
-            let result =
-                deploy_staging(&sha, &checkout_dir, &run_dir, port, &tailscale_hostname).await;
-            (result, pr_number, sha, port)
-        });
-    }
-
-    let mut results = HashMap::new();
-    while let Some(result) = set.join_next().await {
-        match result {
-            Ok((Ok((deployment, logs)), pr_number, _sha, _port)) => {
-                results.insert(pr_number, StagingTaskResult::Deployed(deployment, logs));
-            }
-            Ok((Err(logs), pr_number, sha, port)) => {
-                results.insert(pr_number, StagingTaskResult::Failed(logs, sha, port));
-            }
-            Err(e) => {
-                warn!(error = ?e, "staging task panicked");
-            }
-        }
-    }
-
-    Ok(results)
-}
-
-async fn handle_staging_results(
-    results: HashMap<u64, StagingTaskResult>,
-    installation: &Installation,
-    port_allocator: &mut PortAllocator,
-    staging_deployments: &mut HashMap<Sha, StagingDeployment>,
-    tailscale_hostname: &str,
-) {
-    for (pr_number, result) in results {
-        match result {
-            StagingTaskResult::Deployed(deployment, logs) => {
-                info!(sha = %deployment.sha, port = deployment.port, "staging deployment succeeded");
-
-                let preview_url = format!("http://{}:{}/", tailscale_hostname, deployment.port);
-                let comment =
-                    DeployComment::success(preview_url, logs, deployment.sha.as_str().to_string());
-                if let Err(e) = installation
-                    .upsert_deploy_comment(pr_number, &comment)
-                    .await
-                {
-                    warn!(error = ?e, pr = pr_number, "failed to post deploy comment");
-                }
-
-                staging_deployments.insert(deployment.sha.clone(), deployment);
-            }
-            StagingTaskResult::Failed(logs, sha, port) => {
-                warn!(sha = %sha, "staging deployment failed");
-
-                let comment = DeployComment::failure(logs, sha.as_str().to_string());
-                if let Err(e) = installation
-                    .upsert_deploy_comment(pr_number, &comment)
-                    .await
-                {
-                    warn!(error = ?e, pr = pr_number, "failed to post failure comment");
-                }
-
-                port_allocator.release(port);
-            }
-        }
-    }
-}
-
-async fn cleanup_dead_staging(
-    targets: &[hazel::installation::DeployTarget],
-    staging_deployments: &mut HashMap<Sha, StagingDeployment>,
-    port_allocator: &mut PortAllocator,
-) {
-    let target_shas: std::collections::HashSet<_> = targets.iter().map(|t| &t.sha).collect();
-    for sha in staging_deployments
-        .keys()
-        .filter(|sha| !target_shas.contains(sha))
-        .cloned()
-        .collect::<Vec<_>>()
-    {
-        if let Some(mut deployment) = staging_deployments.remove(&sha) {
-            kill_staging(&mut deployment).await;
-            port_allocator.release(deployment.port);
-        }
-    }
 }
 
 fn initialize_production_config() -> anyhow::Result<Option<ProductionConfig>> {
@@ -384,9 +419,12 @@ fn initialize_production_config() -> anyhow::Result<Option<ProductionConfig>> {
         .context("HAZEL_PRODUCTION_PORT must be a number")?;
     let origin = env::var("HAZEL_PRODUCTION_ORIGIN")
         .context("HAZEL_PRODUCTION_ORIGIN required when production enabled")?;
-    let run_dir = PathBuf::from(
-        env::var("HAZEL_PRODUCTION_RUN_DIR")
-            .context("HAZEL_PRODUCTION_RUN_DIR required when production enabled")?,
+    let run_dir: &'static Path = Box::leak(
+        std::path::PathBuf::from(
+            env::var("HAZEL_PRODUCTION_RUN_DIR")
+                .context("HAZEL_PRODUCTION_RUN_DIR required when production enabled")?,
+        )
+        .into_boxed_path(),
     );
 
     Ok(Some(ProductionConfig {
@@ -395,77 +433,6 @@ fn initialize_production_config() -> anyhow::Result<Option<ProductionConfig>> {
         origin,
         run_dir,
     }))
-}
-
-async fn poll_production(
-    installation: &Installation,
-    app_client: &Octocrab,
-    bare_repo: &Path,
-    data_dir: &Path,
-    production_deployment: &mut Option<ProductionDeployment>,
-    config: &ProductionConfig,
-) -> anyhow::Result<()> {
-    let branch_sha = installation
-        .fetch_branch_sha(&config.branch)
-        .await
-        .context("failed to fetch branch sha")?;
-
-    let needs_deploy = production_deployment
-        .as_ref()
-        .map(|d| d.sha != branch_sha)
-        .unwrap_or(true);
-
-    if !needs_deploy {
-        return Ok(());
-    }
-
-    info!(
-        branch = %config.branch,
-        sha = %branch_sha,
-        "production branch updated, deploying"
-    );
-
-    let token = installation
-        .ensure_token(app_client)
-        .await
-        .context("failed to get installation token")?;
-    let fetch_url = format!(
-        "https://x-access-token:{}@github.com/{}.git",
-        secrecy::ExposeSecret::expose_secret(&token),
-        installation.repo
-    );
-
-    let checkout_dir = data_dir.join("checkouts").join(branch_sha.as_str());
-    git::extract_commit(bare_repo, &fetch_url, branch_sha.as_str(), &checkout_dir)
-        .await
-        .context("failed to extract production commit")?;
-
-    build_production(&checkout_dir)
-        .await
-        .context("production build failed")?;
-
-    if let Some(mut old) = production_deployment.take() {
-        kill_production(&mut old).await;
-    }
-
-    let deployment = run_production(
-        &branch_sha,
-        &checkout_dir,
-        &config.run_dir,
-        config.port,
-        &config.origin,
-    )
-    .await
-    .context("production run failed")?;
-
-    info!(
-        sha = %deployment.sha,
-        port = config.port,
-        "production deployment succeeded"
-    );
-    *production_deployment = Some(deployment);
-
-    Ok(())
 }
 
 async fn get_tailscale_hostname() -> anyhow::Result<String> {
