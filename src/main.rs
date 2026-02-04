@@ -53,6 +53,9 @@ async fn main() -> anyhow::Result<()> {
 
     let production_config = initialize_production_config()?;
 
+    // intentionally just watching one repository because YAGNI,
+    // but it wouldn't be hard to generalize this to just query for
+    // repositories where the app is installed.
     let repo_dir = data_dir.join("repos").join(repo.to_string());
     let bare_repo: &'static Path =
         Box::leak(git::ensure_bare_repo(&repo_dir).await?.into_boxed_path());
@@ -66,6 +69,8 @@ async fn main() -> anyhow::Result<()> {
         "hazel started"
     );
 
+    // choosing to do the silly thing and poll because i don't want to
+    // expose a webhook receiver.
     loop {
         let targets = match installation.fetch_deploy_targets(&app_client).await {
             Ok(t) => t,
@@ -166,18 +171,18 @@ async fn deploy_staging_targets(
 
     for &target in targets {
         let port = port_allocator.allocate()?;
-        let target = target.clone();
+        let DeployTarget {
+            sha,
+            fetch_url,
+            pr_number,
+        } = target.clone();
 
         set.spawn(async move {
-            let checkout_dir = data_dir.join("checkouts").join(target.sha.as_str());
+            let checkout_dir = data_dir.join("checkouts").join(sha.as_str());
 
-            if let Err(e) = git::extract_commit(
-                bare_repo,
-                target.fetch_url.as_str(),
-                target.sha.as_str(),
-                &checkout_dir,
-            )
-            .await
+            if let Err(e) =
+                git::extract_commit(bare_repo, fetch_url.as_str(), sha.as_str(), &checkout_dir)
+                    .await
             {
                 let logs = BuildLogs {
                     pre_start_build: Some(Err(hazel::deploy::BuildOutput {
@@ -186,12 +191,12 @@ async fn deploy_staging_targets(
                     })),
                     ..Default::default()
                 };
-                return (Err(logs), target.pr_number, target.sha, port);
+                return (Err(logs), pr_number, sha, port);
             }
 
-            let run_dir = data_dir.join("staging").join(target.sha.as_str());
+            let run_dir = data_dir.join("staging").join(sha.as_str());
             let result = deploy_staging(&checkout_dir, &run_dir, port, tailscale_hostname).await;
-            (result, target.pr_number, target.sha, port)
+            (result, pr_number, sha, port)
         });
     }
 
