@@ -54,7 +54,8 @@ async fn main() -> anyhow::Result<()> {
     let production_config = initialize_production_config()?;
 
     let repo_dir = data_dir.join("repos").join(repo.to_string());
-    let bare_repo: &'static Path = Box::leak(git::ensure_bare_repo(&repo_dir).await?.into_boxed_path());
+    let bare_repo: &'static Path =
+        Box::leak(git::ensure_bare_repo(&repo_dir).await?.into_boxed_path());
 
     let mut staging_deployments: HashMap<Sha, StagingDeployment> = HashMap::new();
     let mut production_deployment: Option<ProductionDeployment> = None;
@@ -163,18 +164,20 @@ async fn deploy_staging_targets(
 ) -> anyhow::Result<()> {
     let mut set: JoinSet<(StagingResult, u64, Sha, u16)> = JoinSet::new();
 
-    for target in targets {
+    for &target in targets {
         let port = port_allocator.allocate()?;
-        let sha = target.sha.clone();
-        let fetch_url = target.fetch_url.clone();
-        let pr_number = target.pr_number;
+        let target = target.clone();
 
         set.spawn(async move {
-            let checkout_dir = data_dir.join("checkouts").join(sha.as_str());
+            let checkout_dir = data_dir.join("checkouts").join(target.sha.as_str());
 
-            if let Err(e) =
-                git::extract_commit(bare_repo, fetch_url.as_str(), sha.as_str(), &checkout_dir)
-                    .await
+            if let Err(e) = git::extract_commit(
+                bare_repo,
+                target.fetch_url.as_str(),
+                target.sha.as_str(),
+                &checkout_dir,
+            )
+            .await
             {
                 let logs = BuildLogs {
                     pre_start_build: Some(Err(hazel::deploy::BuildOutput {
@@ -183,12 +186,12 @@ async fn deploy_staging_targets(
                     })),
                     ..Default::default()
                 };
-                return (Err(logs), pr_number, sha, port);
+                return (Err(logs), target.pr_number, target.sha, port);
             }
 
-            let run_dir = data_dir.join("staging").join(sha.as_str());
+            let run_dir = data_dir.join("staging").join(target.sha.as_str());
             let result = deploy_staging(&checkout_dir, &run_dir, port, tailscale_hostname).await;
-            (result, pr_number, sha, port)
+            (result, target.pr_number, target.sha, port)
         });
     }
 
@@ -201,27 +204,25 @@ async fn deploy_staging_targets(
             }
         };
 
-        let (comment, deployed) = match staging_result {
+        let comment = match staging_result {
             Ok((process, logs)) => {
                 info!(sha = %sha, port, "staging deployment succeeded");
                 let preview_url = format!("http://{}:{}/", tailscale_hostname, port);
-                let comment = DeployComment::success(preview_url, logs, sha.as_str().to_string());
                 staging_deployments.insert(sha.clone(), StagingDeployment { port, process });
-                (comment, true)
+                DeployComment::success(preview_url, logs, sha.as_str().to_string())
             }
             Err(logs) => {
                 warn!(sha = %sha, "staging deployment failed");
-                let comment = DeployComment::failure(logs, sha.as_str().to_string());
-                (comment, false)
+                port_allocator.release(port);
+                DeployComment::failure(logs, sha.as_str().to_string())
             }
         };
 
-        if let Err(e) = installation.upsert_deploy_comment(pr_number, &comment).await {
+        if let Err(e) = installation
+            .upsert_deploy_comment(pr_number, &comment)
+            .await
+        {
             warn!(error = ?e, pr = pr_number, "failed to post deploy comment");
-        }
-
-        if !deployed {
-            port_allocator.release(port);
         }
     }
 
