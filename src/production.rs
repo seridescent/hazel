@@ -2,6 +2,7 @@ use std::path::Path;
 use tokio::process::Child;
 
 use crate::deploy::{BuildLogs, build_derivation, run_deployment};
+use crate::env_config::EnvConfig;
 
 /// Builds production derivations. Call before killing old deployment to minimize downtime.
 pub async fn build_production(checkout_dir: &Path) -> anyhow::Result<()> {
@@ -22,6 +23,7 @@ pub async fn run_production(
     run_dir: &Path,
     port: u16,
     origin: &str,
+    env_config: &EnvConfig,
 ) -> anyhow::Result<Child> {
     let logs = BuildLogs::default();
 
@@ -32,6 +34,7 @@ pub async fn run_production(
         origin,
         "hazel-production-preStart",
         "hazel-production-executable",
+        env_config.production_vars(),
         logs,
     )
     .await
