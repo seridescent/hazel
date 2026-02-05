@@ -42,3 +42,16 @@ def test_staging_deploy_comment_exists(staging_info):
     assert comment is not None
     assert comment["success"] is True
     assert comment["url"] is not None
+
+
+def test_staging_custom_env_shared(staging_info):
+    """Base env var passed through, overridden by staging file."""
+    _, status = staging_info
+    # Staging file overrides base
+    assert status["env"]["HAZEL_CUSTOM_SHARED"] == "overridden-by-staging"
+
+
+def test_staging_custom_env_specific(staging_info):
+    """Staging-specific env var passed through."""
+    _, status = staging_info
+    assert status["env"]["HAZEL_CUSTOM_STAGING"] == "staging-specific-value"

@@ -29,3 +29,14 @@ def test_production_version(production_ready):
     # version.txt starts at "1" and increments over test runs
     version = production_ready["version"]
     assert version.isdigit()
+
+
+def test_production_custom_env_shared(production_ready):
+    """Base env var passed through to production."""
+    # Production doesn't override, so base value should appear
+    assert production_ready["env"]["HAZEL_CUSTOM_SHARED"] == "shared-value-from-base"
+
+
+def test_production_custom_env_specific(production_ready):
+    """Production-specific env var passed through."""
+    assert production_ready["env"]["HAZEL_CUSTOM_PRODUCTION"] == "production-specific-value"

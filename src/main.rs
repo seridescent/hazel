@@ -2,6 +2,7 @@ use anyhow::{Context, bail};
 use hazel::{
     Repo, Sha,
     deploy::{BuildLogs, kill_process},
+    env_config::{EnvConfig, load_env_config},
     git,
     installation::{DeployComment, DeployTarget, Installation},
     port_allocator::PortAllocator,
@@ -47,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
     let poll_interval = initialize_poll_interval()?;
     let tailscale_hostname: &'static str =
         Box::leak(get_tailscale_hostname().await?.into_boxed_str());
+    let env_config: &'static EnvConfig = Box::leak(Box::new(load_env_config()));
 
     let repo = initialize_watched_repo()?;
     let installation = initialize_installation(&app_client, repo.clone()).await?;
@@ -99,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
                 tailscale_hostname,
                 &installation,
                 &mut staging_deployments,
+                env_config,
             )
             .await
             {
@@ -117,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
                 data_dir,
                 &mut production_deployment,
                 config,
+                env_config,
             )
             .await
         {
@@ -166,6 +170,7 @@ async fn deploy_staging_targets(
     tailscale_hostname: &'static str,
     installation: &Installation,
     staging_deployments: &mut HashMap<Sha, StagingDeployment>,
+    env_config: &'static EnvConfig,
 ) -> anyhow::Result<()> {
     let mut set: JoinSet<(StagingResult, u64, Sha, u16)> = JoinSet::new();
 
@@ -195,7 +200,7 @@ async fn deploy_staging_targets(
             }
 
             let run_dir = data_dir.join("staging").join(sha.as_str());
-            let result = deploy_staging(&checkout_dir, &run_dir, port, tailscale_hostname).await;
+            let result = deploy_staging(&checkout_dir, &run_dir, port, tailscale_hostname, env_config).await;
             (result, pr_number, sha, port)
         });
     }
@@ -260,6 +265,7 @@ async fn poll_production(
     data_dir: &Path,
     production_deployment: &mut Option<ProductionDeployment>,
     config: &ProductionConfig,
+    env_config: &EnvConfig,
 ) -> anyhow::Result<()> {
     let branch_sha = installation
         .fetch_branch_sha(&config.branch)
@@ -304,7 +310,7 @@ async fn poll_production(
         kill_process(&mut old.process).await;
     }
 
-    let process = run_production(&checkout_dir, config.run_dir, config.port, &config.origin)
+    let process = run_production(&checkout_dir, config.run_dir, config.port, &config.origin, env_config)
         .await
         .context("production run failed")?;
 

@@ -58,15 +58,20 @@ pub async fn build_derivation(checkout_dir: &Path, attr: &str) -> Result<BuildOu
 
 /// Runs a deployment: executes preStart, then spawns the executable.
 /// Takes pre-captured build logs and returns the child process with complete logs.
-pub async fn run_deployment(
+/// Extra env vars are applied first, then runtime vars (HAZEL_PORT, etc.) override.
+pub async fn run_deployment<'a, I>(
     checkout_dir: &Path,
     run_dir: &Path,
     port: u16,
     origin: &str,
     pre_start_attr: &str,
     executable_attr: &str,
+    extra_env: I,
     mut logs: BuildLogs,
-) -> Result<(Child, BuildLogs), BuildLogs> {
+) -> Result<(Child, BuildLogs), BuildLogs>
+where
+    I: Iterator<Item = (&'a str, &'a str)> + Clone,
+{
     if let Err(e) = tokio::fs::create_dir_all(run_dir).await {
         // If we can't create run_dir, add a synthetic error to logs
         logs.pre_start_run = Some(Err(BuildOutput {
@@ -88,6 +93,7 @@ pub async fn run_deployment(
             &format!("{}#{}", checkout_dir.display(), pre_start_attr),
         ])
         .current_dir(run_dir)
+        .envs(extra_env.clone())
         .envs(env_vars.clone())
         .output()
         .await;
@@ -123,6 +129,7 @@ pub async fn run_deployment(
             &format!("{}#{}", checkout_dir.display(), executable_attr),
         ])
         .current_dir(run_dir)
+        .envs(extra_env)
         .envs(env_vars)
         .spawn();
 

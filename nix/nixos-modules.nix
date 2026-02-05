@@ -76,6 +76,29 @@
             default = 30;
           };
 
+          envFiles = {
+            base = lib.mkOption {
+              description = "Path to a dotenv-format file with environment variables shared by both staging and production deployments.";
+              type = lib.types.nullOr lib.types.path;
+              default = null;
+              example = "/run/secrets/hazel-base.env";
+            };
+
+            staging = lib.mkOption {
+              description = "Path to a dotenv-format file with environment variables for staging deployments. These override values from the base env file.";
+              type = lib.types.nullOr lib.types.path;
+              default = null;
+              example = "/run/secrets/hazel-staging.env";
+            };
+
+            production = lib.mkOption {
+              description = "Path to a dotenv-format file with environment variables for production deployments. These override values from the base env file.";
+              type = lib.types.nullOr lib.types.path;
+              default = null;
+              example = "/run/secrets/hazel-production.env";
+            };
+          };
+
           production = {
             enable = lib.mkEnableOption "production deployment";
 
@@ -148,6 +171,12 @@
             HAZEL_PRODUCTION_BRANCH = cfg.production.branch;
             HAZEL_PRODUCTION_PORT = toString cfg.production.port;
             HAZEL_PRODUCTION_ORIGIN = cfg.production.origin;
+          } // lib.optionalAttrs (cfg.envFiles.base != null) {
+            HAZEL_BASE_ENV_FILE = cfg.envFiles.base;
+          } // lib.optionalAttrs (cfg.envFiles.staging != null) {
+            HAZEL_STAGING_ENV_FILE = cfg.envFiles.staging;
+          } // lib.optionalAttrs (cfg.envFiles.production != null) {
+            HAZEL_PRODUCTION_ENV_FILE = cfg.envFiles.production;
           };
 
           serviceConfig = {

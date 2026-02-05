@@ -2,6 +2,7 @@ use std::path::Path;
 use tokio::process::Child;
 
 use crate::deploy::{BuildLogs, build_derivation, run_deployment};
+use crate::env_config::EnvConfig;
 
 /// Result type for staging deployments that includes logs in both success and failure cases.
 pub type StagingResult = Result<(Child, BuildLogs), BuildLogs>;
@@ -11,6 +12,7 @@ pub async fn deploy_staging(
     run_dir: &Path,
     port: u16,
     tailscale_hostname: &str,
+    env_config: &EnvConfig,
 ) -> StagingResult {
     let mut logs = BuildLogs::default();
 
@@ -36,6 +38,7 @@ pub async fn deploy_staging(
         &origin,
         "hazel-preStart",
         "hazel-executable",
+        env_config.staging_vars(),
         logs,
     )
     .await
