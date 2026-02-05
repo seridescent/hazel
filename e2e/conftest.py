@@ -104,6 +104,22 @@ def hazel_env() -> dict[str, str]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     PROD_RUN_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Write env files for testing custom env var passthrough
+    ENV_FILE_DIR = DATA_DIR / "env-files"
+    ENV_FILE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Base env file (shared)
+    base_env_file = ENV_FILE_DIR / "base.env"
+    base_env_file.write_text("HAZEL_CUSTOM_SHARED=shared-value-from-base\n")
+
+    # Staging env file
+    staging_env_file = ENV_FILE_DIR / "staging.env"
+    staging_env_file.write_text("HAZEL_CUSTOM_STAGING=staging-specific-value\nHAZEL_CUSTOM_SHARED=overridden-by-staging\n")
+
+    # Production env file
+    production_env_file = ENV_FILE_DIR / "production.env"
+    production_env_file.write_text("HAZEL_CUSTOM_PRODUCTION=production-specific-value\n")
+
     # Seed production data.txt -- the prod run dir is persistent and production
     # doesn't use preStart for data seeding (unlike staging which gets a fresh
     # run dir each deploy). We write it here so the service can read it.
@@ -128,6 +144,9 @@ def hazel_env() -> dict[str, str]:
         "HAZEL_PRODUCTION_ORIGIN": f"http://localhost:{PRODUCTION_PORT}",
         "HAZEL_PRODUCTION_BRANCH": "e2e/production",
         "RUST_LOG": "debug",
+        "HAZEL_BASE_ENV_FILE": str(base_env_file),
+        "HAZEL_STAGING_ENV_FILE": str(staging_env_file),
+        "HAZEL_PRODUCTION_ENV_FILE": str(production_env_file),
     }
 
 
