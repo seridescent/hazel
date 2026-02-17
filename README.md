@@ -1,8 +1,8 @@
 # hazel
 
-a dead-simple service to run nix installables for http servers from github PRs.
+a dead-simple service to run nix installables for http servers from github.
 
-this is just a side quest to get automated PR deploys on my homelab for a different side project,
+this is just a side quest to get automated staging and production deploys on my homelab for a different side project,
 a full stack app.
 
 interestingly, writing this seemed preferred to wrangling docker and probably some other
