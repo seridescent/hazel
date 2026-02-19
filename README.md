@@ -21,7 +21,7 @@ is annoying on my macbook, so using a nix installables approach is simpler *for 
 
 ## why you should not use this
 
-i can't stress enough that you really should not do this in the general case.
+i can't stress enough that you really should not use this in the general case.
 ask your favorite LLM how to do self-hosted gitops CICD and you'll probably get 
 some pointers on kubernetes or some other more put-together tools. or just use a platform.
 
