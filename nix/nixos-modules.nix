@@ -148,6 +148,8 @@
         systemd.services.hazel = {
           description = "Hazel PR preview deployment service";
           wantedBy = [ "multi-user.target" ];
+          wants = [ "network-online.target" ];
+          after = [ "network-online.target" ];
           path = [ pkgs.git pkgs.tailscale config.nix.package pkgs.gnutar ];
 
           environment = {
