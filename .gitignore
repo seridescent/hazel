@@ -4,3 +4,4 @@
 .env
 secrets/
 data/
+.DS_Store
